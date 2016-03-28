@@ -69,7 +69,7 @@ def apply_dropout(x, dropout_prob, v2=False):
 class Layer(object):
     '''
         Basic neural layer -- y = f(Wx+b)
-        foward(x) returns y
+        forward(x) returns y
 
         Inputs
         ------
@@ -217,15 +217,21 @@ class EmbeddingLayer(object):
 
         if embs is not None:
             vocab_map = {}
-            emb_vals = [ ]
-            for word, vector in embs:
-                assert word not in vocab_map, "Duplicate words in initial embeddings"
-                vocab_map[word] = len(vocab_map)
-                emb_vals.append(vector)
+            emb_vals = []
+            if type(embs)==dict:
+                for word, vector in embs.iteritems():
+                    assert word not in vocab_map, "Duplicate words in initial embeddings"
+                    vocab_map[word] = len(emb_vals)
+                    emb_vals.append(vector)
+            else:
+                for word, vector in embs:
+                    assert word not in vocab_map, "Duplicate words in initial embeddings"
+                    vocab_map[word] = len(emb_vals)
+                    emb_vals.append(vector)
 
             self.init_end = len(emb_vals) if fix_init_embs else -1
             if n_d != len(emb_vals[0]):
-                say("WARNING: n_d ({}) != init word vector size ({}). Use {} instead.\n".format(
+                say("WARNING: n_d ({}) != init word vector size ({}). Using {} instead.\n".format(
                         n_d, len(emb_vals[0]), len(emb_vals[0])
                     ))
                 n_d = len(emb_vals[0])

@@ -3,15 +3,48 @@ import cPickle as pickle
 from collections import Counter
 
 import numpy as np
+import scipy
 import theano
 import theano.tensor as T
 
 sys.path.append('../')
+sys.path.append('../../../adulteration/wikipedia')
 from nn import get_activation_by_name, create_optimization_updates, softmax
 from nn import Layer, EmbeddingLayer, LSTM, RCNN, StrCNN, Dropout, apply_dropout
 from utils import say, load_embedding_iterator
 
+from wikipedia import *
+
 np.set_printoptions(precision=3)
+wiki_path = '../../../adulteration/wikipedia/'
+
+def read_corpus_adulteration():
+    with open(wiki_path+'input_to_outputs.pkl') as f_in:
+        input_to_outputs = pickle.load(f_in)
+    corpus_x, corpus_y, len_corpus_y = [], [], []
+    #y_indptr = [0]
+    #y_indices = []
+    #y_data = []
+    input_keys = sorted(input_to_outputs.keys())
+    input_tokens = input_to_tokens(input_keys, get_ings(5000))
+    for inp, tokens in zip(input_keys, input_tokens):
+        out = input_to_outputs[inp]
+        if out.sum() <= 0:
+            continue
+        #y_data.extend(out)
+        #y_indices.extend(range(len(out)))
+        #y_indptr.append(len(out))
+        if len(tokens) > 5:
+            corpus_x.append(tokens)
+        else:
+            corpus_x.append([])
+        normalized = out*1. / out.sum()
+        assert np.isclose(normalized.sum(), 1, atol=1e-5)
+        corpus_y.append(normalized)
+        len_corpus_y.append(out.sum())
+    assert len(corpus_x)==len(corpus_y)
+    #corpus_y = scipy.sparse.csr_matrix((y_data, y_indices, np.cumsum(y_indptr)))
+    return corpus_x, corpus_y
 
 def read_corpus(path):
     with open(path) as fin:
@@ -25,6 +58,8 @@ def read_corpus(path):
 def create_one_batch(ids, x, y):
     batch_x = np.column_stack( [ x[i] for i in ids ] )
     batch_y = np.array( [ y[i] for i in ids ] )
+    #batch_y = y[ids]
+    assert batch_x.shape[1] == batch_y.shape[0]
     return batch_x, batch_y
 
 # shuffle training examples and create mini-batches
@@ -32,7 +67,8 @@ def create_batches(perm, x, y, batch_size):
 
     # sort sequences based on their length
     # permutation is necessary if we want different batches every epoch
-    lst = sorted(perm, key=lambda i: len(x[i]))
+    first_nonzero_idx = sum([1 for i in x if len(i)==0])
+    lst = sorted(perm, key=lambda i: len(x[i]))[first_nonzero_idx:]
 
     batches_x = [ ]
     batches_y = [ ]
@@ -55,6 +91,7 @@ def create_batches(perm, x, y, batch_size):
     random.shuffle(batch_perm)
     batches_x = [ batches_x[i] for i in batch_perm ]
     batches_y = [ batches_y[i] for i in batch_perm ]
+    assert len(batches_x) == len(batches_y)
     return batches_x, batches_y
 
 
@@ -77,10 +114,13 @@ class Model:
         # x is length * batch_size
         # y is batch_size
         self.x = T.imatrix('x')
-        self.y = T.ivector('y')
+        #self.y = T.ivector('y')
+        self.y = T.imatrix('y')
+        self.y_len = T.ivector()
 
         x = self.x
         y = self.y
+        y_len = self.y_len
         n_hidden = self.n_hidden
         n_in = self.n_in
 
@@ -103,11 +143,13 @@ class Model:
         activation = get_activation_by_name(args.act)
         for i in range(depth):
             if args.layer.lower() == "lstm":
+                print "Layer: LSTM"
                 layer = LSTM(
                             n_in = n_hidden if i > 0 else n_in,
                             n_out = n_hidden
                         )
             elif args.layer.lower() == "strcnn":
+                print "Layer: StrCNN"
                 layer = StrCNN(
                             n_in = n_hidden if i > 0 else n_in,
                             n_out = n_hidden,
@@ -116,6 +158,7 @@ class Model:
                             order = args.order
                         )
             elif args.layer.lower() == "rcnn":
+                print "Layer: RCNN"
                 layer = RCNN(
                             n_in = n_hidden if i > 0 else n_in,
                             n_out = n_hidden,
@@ -158,6 +201,7 @@ class Model:
         # unnormalized score of y given x
         self.p_y_given_x = layers[-1].forward(softmax_input)
         self.pred = T.argmax(self.p_y_given_x, axis=1)
+
         self.nll_loss = T.mean( T.nnet.categorical_crossentropy(
                                     self.p_y_given_x,
                                     y
@@ -177,7 +221,6 @@ class Model:
         nparams = sum(len(x.get_value(borrow=True).ravel()) \
                         for x in self.params)
         say("total # parameters: {}\n".format(nparams))
-
 
     def save_model(self, path, args):
          # append file suffix
@@ -247,9 +290,15 @@ class Model:
             )[:3]
 
         train_model = theano.function(
-             inputs = [self.x, self.y],
+             inputs = [self.x, self.y],#, self.y_len],
              outputs = [ cost, gnorm ],
              updates = updates,
+             allow_input_downcast = True
+        )
+
+        predict_model = theano.function(
+             inputs = [self.x],
+             outputs = self.p_y_given_x,
              allow_input_downcast = True
         )
 
@@ -286,8 +335,10 @@ class Model:
 
                 x = batches_x[i]
                 y = batches_y[i]
+                y_len = np.array([j.sum() for j in batches_y[i]])
+                #y = y.toarray()
 
-                va, grad_norm = train_model(x, y)
+                va, grad_norm = train_model(x, y)#, y_len)
                 train_loss += va
 
                 # debug
@@ -337,6 +388,12 @@ class Model:
 
                     start_time = time.time()
 
+            print "Lenght of trainx: ", len(trainx)
+            for x_idx, x_for_predict in enumerate(trainx[3233:3236]):
+                if len(x_for_predict) > 0:
+                    p_y_given_x = predict_model(np.vstack(x_for_predict))
+                    print x_idx, p_y_given_x
+
 
 def main(args):
     print args
@@ -345,14 +402,22 @@ def main(args):
 
     assert args.embedding, "Pre-trained word embeddings required."
 
+    if '.pkl' in args.embedding:
+        with open(args.embedding, 'rb') as f:
+            embedding = pickle.load(f)
+            if '<unk>' not in embedding:
+                embedding['<unk>'] = np.zeros(len(embedding['</s>']))
+    else:
+        embedding = load_embedding_iterator(args.embedding)
+
     embedding_layer = EmbeddingLayer(
                 n_d = args.hidden_dim,
                 vocab = [ "<unk>" ],
-                embs = load_embedding_iterator(args.embedding)
+                embs = embedding       
             )
 
     if args.train:
-        train_x, train_y = read_corpus(args.train)
+        train_x, train_y = read_corpus_adulteration()
         train_x = [ embedding_layer.map_to_ids(x) for x in train_x ]
 
     if args.dev:
@@ -367,7 +432,7 @@ def main(args):
         model = Model(
                     args = args,
                     embedding_layer = embedding_layer,
-                    nclasses = max(train_y)+1
+                    nclasses = len(train_y[0]) #max(train_y.data)+1
             )
         model.ready()
         model.train(
