@@ -40,7 +40,7 @@ def read_corpus_adulteration():
             corpus_x.append([])
         normalized = out*1. / out.sum()
         assert np.isclose(normalized.sum(), 1, atol=1e-5)
-        corpus_y.append(normalized)
+        corpus_y.append(normalized.astype('float32'))
         len_corpus_y.append(out.sum())
     assert len(corpus_x)==len(corpus_y)
     #corpus_y = scipy.sparse.csr_matrix((y_data, y_indices, np.cumsum(y_indptr)))
@@ -115,7 +115,7 @@ class Model:
         # y is batch_size
         self.x = T.imatrix('x')
         #self.y = T.ivector('y')
-        self.y = T.imatrix('y')
+        self.y = T.fmatrix('y')
         self.y_len = T.ivector()
 
         x = self.x
@@ -338,6 +338,8 @@ class Model:
                 y_len = np.array([j.sum() for j in batches_y[i]])
                 #y = y.toarray()
 
+                assert x.dtype in ['float32', 'int32']
+                assert y.dtype in ['float32', 'int32']
                 va, grad_norm = train_model(x, y)#, y_len)
                 train_loss += va
 
