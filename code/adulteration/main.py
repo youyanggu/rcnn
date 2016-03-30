@@ -4,15 +4,18 @@ from collections import Counter
 
 import numpy as np
 import scipy
+from sklearn.cross_validation import train_test_split
 import theano
 import theano.tensor as T
 
 sys.path.append('../')
 sys.path.append('../../../adulteration/wikipedia')
+sys.path.append('../../../adulteration/model')
 from nn import get_activation_by_name, create_optimization_updates, softmax
 from nn import Layer, EmbeddingLayer, LSTM, RCNN, StrCNN, Dropout, apply_dropout
 from utils import say, load_embedding_iterator
 
+import scoring
 from wikipedia import *
 
 np.set_printoptions(precision=3)
@@ -69,7 +72,6 @@ def create_batches(perm, x, y, batch_size):
     # permutation is necessary if we want different batches every epoch
     first_nonzero_idx = sum([1 for i in x if len(i)==0])
     lst = sorted(perm, key=lambda i: len(x[i]))[first_nonzero_idx:]
-
     batches_x = [ ]
     batches_y = [ ]
     size = batch_size
@@ -78,6 +80,9 @@ def create_batches(perm, x, y, batch_size):
         if len(ids) < size and len(x[i]) == len(x[ids[0]]):
             ids.append(i)
         else:
+            #print ids
+            #print x, len(x)
+            #print y, len(y)
             bx, by = create_one_batch(ids, x, y)
             batches_x.append(bx)
             batches_y.append(by)
@@ -94,7 +99,46 @@ def create_batches(perm, x, y, batch_size):
     assert len(batches_x) == len(batches_y)
     return batches_x, batches_y
 
+def gen_avg_true_results(valid_ing_indices):
+    # Another baseline is to use the average Y distribution.
+    with open(wiki_path+'input_to_outputs.pkl') as f_in:
+        input_to_outputs = pickle.load(f_in)
 
+    avg_true_results = None
+    for i in valid_ing_indices:
+        if avg_true_results is None:
+            avg_true_results = input_to_outputs[i] * 1. / input_to_outputs[i].sum()
+        else:
+            avg_true_results += input_to_outputs[i] * 1. / input_to_outputs[i].sum()
+    avg_true_results /= len(valid_ing_indices)
+    assert np.isclose(avg_true_results.sum(), 1, atol=1e-5)
+    avg_true_results = np.array([avg_true_results for i in valid_ing_indices])
+    return avg_true_results
+
+def evaluate(x_data, y_data, predict_model):
+    """Compute the MAP of the data."""
+    ing_cat_pair_map = {}
+    for x_idx, x in enumerate(x_data):
+        for y_idx, out in enumerate(y_data[x_idx]):
+            if out > 0:
+                ing_cat_pair_map[(x_idx, y_idx)] = True
+
+    valid_ing_indices, results = [], []
+    for x_idx, x_for_predict in enumerate(x_data):
+        if len(x_for_predict) > 0:
+            p_y_given_x = predict_model(np.vstack(x_for_predict))[0]
+            valid_ing_indices.append(x_idx)
+            results.append(p_y_given_x)
+    valid_ing_indices = np.array(valid_ing_indices)
+    avg_true_results = gen_avg_true_results(valid_ing_indices)
+
+    results = np.array(results)
+    print "Random:"
+    scoring.evaluate_map(valid_ing_indices, results, ing_cat_pair_map, random=True)
+    print "Avg True Results:"
+    scoring.evaluate_map(valid_ing_indices, avg_true_results, ing_cat_pair_map, random=False)
+    print "Model:"
+    scoring.evaluate_map(valid_ing_indices, results, ing_cat_pair_map, random=False)
 
 class Model:
     def __init__(self, args, embedding_layer, nclasses):
@@ -320,7 +364,7 @@ class Model:
         say(str([ "%.2f" % np.linalg.norm(x.get_value(borrow=True)) for x in self.params ])+"\n")
         for epoch in xrange(args.max_epochs):
             unchanged += 1
-            if unchanged > 30: return
+            if dev and unchanged > 30: return
             train_loss = 0.0
 
             random.shuffle(perm)
@@ -390,11 +434,15 @@ class Model:
 
                     start_time = time.time()
 
-            print "Lenght of trainx: ", len(trainx)
-            for x_idx, x_for_predict in enumerate(trainx[3233:3236]):
-                if len(x_for_predict) > 0:
-                    p_y_given_x = predict_model(np.vstack(x_for_predict))
-                    print x_idx, p_y_given_x
+            #print "Length of trainx: ", len(trainx)
+            #for x_idx, x_for_predict in enumerate(trainx[3233:3236]):
+            #    if len(x_for_predict) > 0:
+            #        p_y_given_x = predict_model(np.vstack(x_for_predict))
+            #        print x_idx, p_y_given_x
+            print "======= Training evaluation ========"
+            evaluate(trainx, trainy, predict_model)
+            print "======= Testing evaluation ========"
+            evaluate(test[0], test[1], predict_model)
 
 
 def main(args):
@@ -420,6 +468,9 @@ def main(args):
 
     if args.train:
         train_x, train_y = read_corpus_adulteration()
+        if args.test:
+            train_x, test_x, train_y, test_y = train_test_split(
+                train_x, train_y, test_size=1/3., random_state=42)
         train_x = [ embedding_layer.map_to_ids(x) for x in train_x ]
 
     if args.dev:
@@ -427,7 +478,7 @@ def main(args):
         dev_x = [ embedding_layer.map_to_ids(x) for x in dev_x ]
 
     if args.test:
-        test_x, test_y = read_corpus(args.test)
+        #test_x, test_y = read_corpus(args.test)
         test_x = [ embedding_layer.map_to_ids(x) for x in test_x ]
 
     if args.train:
