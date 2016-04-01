@@ -136,6 +136,21 @@ def gen_avg_true_results(valid_ing_indices):
     avg_true_results = np.array([avg_true_results for i in valid_ing_indices])
     return avg_true_results
 
+def save_predictions(predict_model, train, dev, test):
+    trainx, trainy = train
+    devx, devy = dev
+    testx, testy = test
+    for x_data, data_name in [(trainx, 'train'), (devx, 'dev'), (testx, 'test')]:
+        results = []
+        for x_idx, x_for_predict in enumerate(x_data):
+            if len(x_for_predict) > 0:
+                p_y_given_x = predict_model(np.vstack(x_for_predict))[0]
+                results.append(p_y_given_x)
+            else:
+                results.append(np.zeros(len(results[0])))
+        np.save('{}_pred.npy'.format(data_name), np.array(results))
+
+
 def evaluate(x_data, y_data, predict_model):
     """Compute the MAP of the data."""
     ing_cat_pair_map = {}
@@ -468,6 +483,8 @@ class Model:
             evaluate(dev[0], dev[1], predict_model)
             print "======= Adulteration evaluation ========"
             evaluate(test[0], test[1], predict_model)
+
+        save_predictions(predict_model, train, dev, test)
 
 
 def main(args):
