@@ -21,8 +21,29 @@ from wikipedia import *
 np.set_printoptions(precision=3)
 wiki_path = '../../../adulteration/wikipedia/'
 
-def read_corpus_adulteration():
-    with open(wiki_path+'input_to_outputs.pkl') as f_in:
+def read_corpus_adulterants():
+    with open(wiki_path+'input_to_outputs_adulterants.pkl', 'r') as f_in:
+        input_to_outputs = pickle.load(f_in)
+    corpus_x, corpus_y, len_corpus_y = [], [], []
+    input_keys = sorted(input_to_outputs.keys())
+    input_tokens = input_to_tokens(input_keys, get_adulterants())
+    for inp, tokens in zip(input_keys, input_tokens):
+        out = input_to_outputs[inp]
+        if out.sum() <= 0:
+            continue
+        if len(tokens) > 5:
+            corpus_x.append(tokens)
+        else:
+            corpus_x.append([])
+        normalized = out*1. / out.sum()
+        assert np.isclose(normalized.sum(), 1, atol=1e-5)
+        corpus_y.append(normalized.astype('float32'))
+        len_corpus_y.append(out.sum())
+    assert len(corpus_x)==len(corpus_y)
+    return corpus_x, corpus_y
+
+def read_corpus_ingredients():
+    with open(wiki_path+'input_to_outputs.pkl', 'r') as f_in:
         input_to_outputs = pickle.load(f_in)
     corpus_x, corpus_y, len_corpus_y = [], [], []
     #y_indptr = [0]
@@ -101,7 +122,7 @@ def create_batches(perm, x, y, batch_size):
 
 def gen_avg_true_results(valid_ing_indices):
     # Another baseline is to use the average Y distribution.
-    with open(wiki_path+'input_to_outputs.pkl') as f_in:
+    with open(wiki_path+'input_to_outputs.pkl', 'r') as f_in:
         input_to_outputs = pickle.load(f_in)
 
     avg_true_results = None
@@ -364,7 +385,7 @@ class Model:
         say(str([ "%.2f" % np.linalg.norm(x.get_value(borrow=True)) for x in self.params ])+"\n")
         for epoch in xrange(args.max_epochs):
             unchanged += 1
-            if dev and unchanged > 30: return
+            #if dev and unchanged > 30: return
             train_loss = 0.0
 
             random.shuffle(perm)
@@ -407,6 +428,7 @@ class Model:
                     ))
                     say(str([ "%.2f" % np.linalg.norm(x.get_value(borrow=True)) for x in self.params ])+"\n")
 
+                    """
                     if dev:
                         preds = [ eval_acc(x) for x in dev_batches_x ]
                         nowf_dev = self.eval_accuracy(preds, dev_batches_y)
@@ -429,6 +451,7 @@ class Model:
 
                         if best_dev > nowf_dev + 0.05:
                             return
+                    """
 
                     self.dropout.set_value(dropout_prob)
 
@@ -441,7 +464,9 @@ class Model:
             #        print x_idx, p_y_given_x
             print "======= Training evaluation ========"
             evaluate(trainx, trainy, predict_model)
-            print "======= Testing evaluation ========"
+            print "======= Validation evaluation ========"
+            evaluate(dev[0], dev[1], predict_model)
+            print "======= Adulteration evaluation ========"
             evaluate(test[0], test[1], predict_model)
 
 
@@ -467,18 +492,18 @@ def main(args):
             )
 
     if args.train:
-        train_x, train_y = read_corpus_adulteration()
-        if args.test:
-            train_x, test_x, train_y, test_y = train_test_split(
+        train_x, train_y = read_corpus_ingredients()
+        if args.dev:
+            train_x, dev_x, train_y, dev_y = train_test_split(
                 train_x, train_y, test_size=1/3., random_state=42)
         train_x = [ embedding_layer.map_to_ids(x) for x in train_x ]
 
     if args.dev:
-        dev_x, dev_y = read_corpus(args.dev)
+        #dev_x, dev_y = read_corpus(args.dev)
         dev_x = [ embedding_layer.map_to_ids(x) for x in dev_x ]
 
     if args.test:
-        #test_x, test_y = read_corpus(args.test)
+        test_x, test_y = read_corpus_adulterants()
         test_x = [ embedding_layer.map_to_ids(x) for x in test_x ]
 
     if args.train:
