@@ -15,6 +15,7 @@ from nn import get_activation_by_name, create_optimization_updates, softmax
 from nn import Layer, EmbeddingLayer, LSTM, RCNN, StrCNN, Dropout, apply_dropout
 from utils import say, load_embedding_iterator
 
+import hier_to_cat
 import scoring
 from wikipedia import *
 
@@ -24,10 +25,16 @@ wiki_path = '../../../adulteration/wikipedia/'
 def read_corpus_adulterants():
     with open(wiki_path+'input_to_outputs_adulterants.pkl', 'r') as f_in:
         input_to_outputs = pickle.load(f_in)
-    corpus_x, corpus_y, len_corpus_y = [], [], []
+    corpus_x, corpus_y, hier_x = [], [], []
     input_keys = sorted(input_to_outputs.keys())
-    input_tokens = input_to_tokens(input_keys, get_adulterants())
-    for inp, tokens in zip(input_keys, input_tokens):
+    adulterants = get_adulterants()
+    input_tokens = input_to_tokens(input_keys, adulterants)
+    ing_idx_to_hier_map = hier_to_cat.gen_ing_idx_to_hier_map(adulterants, adulterants=True)
+    assert len(input_keys) == len(input_tokens)
+    for i in range(len(input_keys)):
+        inp = input_keys[i]
+        tokens = input_tokens[i]
+        hier = ing_idx_to_hier_map.get(i, None)
         out = input_to_outputs[inp]
         if out.sum() <= 0:
             continue
@@ -35,23 +42,30 @@ def read_corpus_adulterants():
             corpus_x.append(tokens)
         else:
             corpus_x.append([])
+        hier_x.append(hier)
         normalized = out*1. / out.sum()
         assert np.isclose(normalized.sum(), 1, atol=1e-5)
         corpus_y.append(normalized.astype('float32'))
-        len_corpus_y.append(out.sum())
+        #len_corpus_y.append(out.sum())
     assert len(corpus_x)==len(corpus_y)
-    return corpus_x, corpus_y
+    return corpus_x, corpus_y, hier_x
 
-def read_corpus_ingredients():
+def read_corpus_ingredients(num_ingredients=5000):
     with open(wiki_path+'input_to_outputs.pkl', 'r') as f_in:
         input_to_outputs = pickle.load(f_in)
-    corpus_x, corpus_y, len_corpus_y = [], [], []
+    corpus_x, corpus_y, hier_x = [], [], []
     #y_indptr = [0]
     #y_indices = []
     #y_data = []
     input_keys = sorted(input_to_outputs.keys())
-    input_tokens = input_to_tokens(input_keys, get_ings(5000))
-    for inp, tokens in zip(input_keys, input_tokens):
+    ings = get_ings(num_ingredients)
+    input_tokens = input_to_tokens(input_keys, ings)
+    ing_idx_to_hier_map = hier_to_cat.gen_ing_idx_to_hier_map(ings)
+    assert len(input_keys) == len(input_tokens) == num_ingredients
+    for i in range(num_ingredients):
+        inp = input_keys[i]
+        tokens = input_tokens[i]
+        hier = ing_idx_to_hier_map.get(i, None)
         out = input_to_outputs[inp]
         if out.sum() <= 0:
             continue
@@ -62,13 +76,15 @@ def read_corpus_ingredients():
             corpus_x.append(tokens)
         else:
             corpus_x.append([])
+        hier_x.append(hier)
         normalized = out*1. / out.sum()
         assert np.isclose(normalized.sum(), 1, atol=1e-5)
         corpus_y.append(normalized.astype('float32'))
-        len_corpus_y.append(out.sum())
+        #len_corpus_y.append(out.sum())
     assert len(corpus_x)==len(corpus_y)
     #corpus_y = scipy.sparse.csr_matrix((y_data, y_indices, np.cumsum(y_indptr)))
-    return corpus_x, corpus_y
+
+    return corpus_x, corpus_y, hier_x
 
 def read_corpus(path):
     with open(path) as fin:
@@ -509,19 +525,19 @@ def main(args):
             )
 
     if args.train:
-        train_x, train_y = read_corpus_ingredients()
+        train_x_text, train_y, train_hier_x = read_corpus_ingredients()
         if args.dev:
-            train_x, dev_x, train_y, dev_y = train_test_split(
-                train_x, train_y, test_size=1/3., random_state=42)
+            train_x_text, dev_x_text, train_y, dev_y = train_test_split(
+                train_x_text, train_y, test_size=1/3., random_state=42)
         train_x = [ embedding_layer.map_to_ids(x) for x in train_x ]
 
     if args.dev:
         #dev_x, dev_y = read_corpus(args.dev)
-        dev_x = [ embedding_layer.map_to_ids(x) for x in dev_x ]
+        dev_x = [ embedding_layer.map_to_ids(x) for x in dev_x_text ]
 
     if args.test:
-        test_x, test_y = read_corpus_adulterants()
-        test_x = [ embedding_layer.map_to_ids(x) for x in test_x ]
+        test_x_text, test_y, test_hier_x = read_corpus_adulterants()
+        test_x = [ embedding_layer.map_to_ids(x) for x in test_x_text ]
 
     if args.train:
         model = Model(
