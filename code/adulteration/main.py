@@ -34,7 +34,7 @@ def read_corpus_adulterants():
     for i in range(len(input_keys)):
         inp = input_keys[i]
         tokens = input_tokens[i]
-        hier = ing_idx_to_hier_map.get(i, None)
+        hier = ing_idx_to_hier_map.get(i, np.zeros(3751))
         out = input_to_outputs[inp]
         if out.sum() <= 0:
             continue
@@ -42,13 +42,13 @@ def read_corpus_adulterants():
             corpus_x.append(tokens)
         else:
             corpus_x.append([])
-        hier_x.append(hier)
+        hier_x.append(hier.astype('float32'))
         normalized = out*1. / out.sum()
         assert np.isclose(normalized.sum(), 1, atol=1e-5)
         corpus_y.append(normalized.astype('float32'))
         #len_corpus_y.append(out.sum())
     assert len(corpus_x)==len(corpus_y)
-    return corpus_x, corpus_y, hier_x
+    return np.array(corpus_x), np.array(corpus_y).astype('float32'), np.array(hier_x).astype('float32')
 
 def read_corpus_ingredients(num_ingredients=5000):
     with open(wiki_path+'input_to_outputs.pkl', 'r') as f_in:
@@ -65,7 +65,8 @@ def read_corpus_ingredients(num_ingredients=5000):
     for i in range(num_ingredients):
         inp = input_keys[i]
         tokens = input_tokens[i]
-        hier = ing_idx_to_hier_map.get(i, None)
+        hier = ing_idx_to_hier_map.get(i, np.zeros(3751))
+        assert len(hier) == 3751
         out = input_to_outputs[inp]
         if out.sum() <= 0:
             continue
@@ -76,15 +77,14 @@ def read_corpus_ingredients(num_ingredients=5000):
             corpus_x.append(tokens)
         else:
             corpus_x.append([])
-        hier_x.append(hier)
+        hier_x.append(hier.astype('float32'))
         normalized = out*1. / out.sum()
         assert np.isclose(normalized.sum(), 1, atol=1e-5)
         corpus_y.append(normalized.astype('float32'))
         #len_corpus_y.append(out.sum())
-    assert len(corpus_x)==len(corpus_y)
+    assert len(corpus_x)==len(corpus_y)==len(hier_x)
     #corpus_y = scipy.sparse.csr_matrix((y_data, y_indices, np.cumsum(y_indptr)))
-
-    return corpus_x, corpus_y, hier_x
+    return np.array(corpus_x), np.array(corpus_y).astype('float32'), np.array(hier_x).astype('float32')
 
 def read_corpus(path):
     with open(path) as fin:
@@ -95,15 +95,16 @@ def read_corpus(path):
     corpus_y = [ int(x[0]) for x in lines ]
     return corpus_x, corpus_y
 
-def create_one_batch(ids, x, y):
+def create_one_batch(ids, x, y, hier):
     batch_x = np.column_stack( [ x[i] for i in ids ] )
     batch_y = np.array( [ y[i] for i in ids ] )
+    batch_hier = np.array( [ hier[i] for i in ids ] ) if hier is not None else None
     #batch_y = y[ids]
-    assert batch_x.shape[1] == batch_y.shape[0]
-    return batch_x, batch_y
+    assert batch_x.shape[1] == batch_y.shape[0] == batch_hier.shape[0]
+    return batch_x, batch_y, batch_hier
 
 # shuffle training examples and create mini-batches
-def create_batches(perm, x, y, batch_size):
+def create_batches(perm, x, y, hier, batch_size):
 
     # sort sequences based on their length
     # permutation is necessary if we want different batches every epoch
@@ -111,6 +112,7 @@ def create_batches(perm, x, y, batch_size):
     lst = sorted(perm, key=lambda i: len(x[i]))[first_nonzero_idx:]
     batches_x = [ ]
     batches_y = [ ]
+    batches_hier = [ ]
     size = batch_size
     ids = [ lst[0] ]
     for i in lst[1:]:
@@ -120,37 +122,24 @@ def create_batches(perm, x, y, batch_size):
             #print ids
             #print x, len(x)
             #print y, len(y)
-            bx, by = create_one_batch(ids, x, y)
+            bx, by, bhier = create_one_batch(ids, x, y, hier)
             batches_x.append(bx)
             batches_y.append(by)
+            batches_hier.append(bhier)
             ids = [ i ]
-    bx, by = create_one_batch(ids, x, y)
+    bx, by, bhier = create_one_batch(ids, x, y, hier)
     batches_x.append(bx)
     batches_y.append(by)
+    batches_hier.append(bhier)
 
     # shuffle batches
     batch_perm = range(len(batches_x))
     random.shuffle(batch_perm)
     batches_x = [ batches_x[i] for i in batch_perm ]
     batches_y = [ batches_y[i] for i in batch_perm ]
-    assert len(batches_x) == len(batches_y)
-    return batches_x, batches_y
-
-def gen_avg_true_results(valid_ing_indices):
-    # Another baseline is to use the average Y distribution.
-    with open(wiki_path+'input_to_outputs.pkl', 'r') as f_in:
-        input_to_outputs = pickle.load(f_in)
-
-    avg_true_results = None
-    for i in valid_ing_indices:
-        if avg_true_results is None:
-            avg_true_results = input_to_outputs[i] * 1. / input_to_outputs[i].sum()
-        else:
-            avg_true_results += input_to_outputs[i] * 1. / input_to_outputs[i].sum()
-    avg_true_results /= len(valid_ing_indices)
-    assert np.isclose(avg_true_results.sum(), 1, atol=1e-5)
-    avg_true_results = np.array([avg_true_results for i in valid_ing_indices])
-    return avg_true_results
+    batches_hier = [ batches_hier[i] for i in batch_perm ]
+    assert len(batches_x) == len(batches_y) == len(batches_hier)
+    return batches_x, batches_y, batches_hier
 
 def save_predictions(predict_model, train, dev, test):
     trainx, trainy = train
@@ -182,7 +171,7 @@ def evaluate(x_data, y_data, predict_model):
             valid_ing_indices.append(x_idx)
             results.append(p_y_given_x)
     valid_ing_indices = np.array(valid_ing_indices)
-    avg_true_results = gen_avg_true_results(valid_ing_indices)
+    avg_true_results = scoring.gen_avg_true_results(valid_ing_indices)
 
     results = np.array(results)
     print "Random:"
@@ -208,14 +197,17 @@ class Model:
             )
 
         # x is length * batch_size
-        # y is batch_size
+        # y is batch_size * num_cats
+        # hier is batch_size * hier_dim
         self.x = T.imatrix('x')
+        self.hier = T.fmatrix('hier')
         #self.y = T.ivector('y')
         self.y = T.fmatrix('y')
         self.y_len = T.ivector()
 
         x = self.x
         y = self.y
+        hier = self.hier
         y_len = self.y_len
         n_hidden = self.n_hidden
         n_in = self.n_in
@@ -279,6 +271,12 @@ class Model:
             softmax_input = T.concatenate(softmax_inputs, axis=1) / x.shape[0]
         else:
             softmax_input = T.concatenate(softmax_inputs, axis=1)
+        
+        # HIER CODE
+        #hier = T.sum(hier, axis=0) / x.shape[0]
+        #softmax_input = T.concatenate([softmax_input, hier], axis=0)
+        ###
+
         softmax_input = apply_dropout(softmax_input, dropout, v2=True)
 
         # feed the feature repr. to the softmax output layer
@@ -355,24 +353,31 @@ class Model:
         return fine/fine_tot
 
 
-    def train(self, train, dev, test):
+    def train(self, train, dev, test, hier):
+        print "I AM HERE"
         args = self.args
         trainx, trainy = train
+        if hier is None:
+            train_hier_x, dev_hier_x, test_hier_x = None, None, None
+        else:
+            train_hier_x, dev_hier_x, test_hier_x = hier
         batch_size = args.batch
 
         if dev:
-            dev_batches_x, dev_batches_y = create_batches(
+            dev_batches_x, dev_batches_y, dev_batches_hier = create_batches(
                     range(len(dev[0])),
                     dev[0],
                     dev[1],
+                    dev_hier_x,
                     batch_size
             )
 
         if test:
-            test_batches_x, test_batches_y = create_batches(
+            test_batches_x, test_batches_y, test_batches_hier = create_batches(
                     range(len(test[0])),
                     test[0],
                     test[1],
+                    test_hier_x,
                     batch_size
             )
 
@@ -384,26 +389,27 @@ class Model:
                 lr = args.learning_rate,
                 method = args.learning
             )[:3]
-
+        print "I AM HERE"
         train_model = theano.function(
-             inputs = [self.x, self.y],#, self.y_len],
+             inputs = [self.x, self.y],#, self.hier],
              outputs = [ cost, gnorm ],
              updates = updates,
              allow_input_downcast = True
         )
-
+        print "I AM HERE"
         predict_model = theano.function(
-             inputs = [self.x],
+             inputs = [self.x, self.hier],
              outputs = self.p_y_given_x,
              allow_input_downcast = True
         )
+        print "I AM HERE"
 
         eval_acc = theano.function(
-             inputs = [self.x],
+             inputs = [self.x, self.hier],
              outputs = self.pred,
              allow_input_downcast = True
         )
-
+        print "I AM HERE"
         unchanged = 0
         best_dev = 0.0
         dropout_prob = np.float64(args.dropout_rate).astype(theano.config.floatX)
@@ -415,13 +421,14 @@ class Model:
 
         say(str([ "%.2f" % np.linalg.norm(x.get_value(borrow=True)) for x in self.params ])+"\n")
         for epoch in xrange(args.max_epochs):
+            print "I AM HERE"
             unchanged += 1
             #if dev and unchanged > 30: return
             train_loss = 0.0
 
             random.shuffle(perm)
-            batches_x, batches_y = create_batches(perm, trainx, trainy, batch_size)
-
+            batches_x, batches_y, batches_hier = create_batches(perm, trainx, trainy, train_hier_x, batch_size)
+            print "I AM HERE"
             N = len(batches_x)
             for i in xrange(N):
 
@@ -431,12 +438,17 @@ class Model:
 
                 x = batches_x[i]
                 y = batches_y[i]
+                hier = batches_hier[i]
                 y_len = np.array([j.sum() for j in batches_y[i]])
                 #y = y.toarray()
 
                 assert x.dtype in ['float32', 'int32']
                 assert y.dtype in ['float32', 'int32']
-                va, grad_norm = train_model(x, y)#, y_len)
+                assert hier.dtype in ['float32', 'int32']
+                print x[0]
+                print y[0]
+                print hier[0]
+                va, grad_norm = train_model(x, y, hier)
                 train_loss += va
 
                 # debug
@@ -524,12 +536,21 @@ def main(args):
                 embs = embedding       
             )
 
+    train_hier_x = dev_hier_x = test_hier_x = None
     if args.train:
         train_x_text, train_y, train_hier_x = read_corpus_ingredients()
+        num_data = len(train_x_text)
+        print "Num data points:", num_data
         if args.dev:
-            train_x_text, dev_x_text, train_y, dev_y = train_test_split(
-                train_x_text, train_y, test_size=1/3., random_state=42)
-        train_x = [ embedding_layer.map_to_ids(x) for x in train_x ]
+            train_indices, dev_indices = train_test_split(
+                range(num_data), test_size=1/3., random_state=42)
+            dev_x_text = train_x_text[dev_indices]
+            train_x_text = train_x_text[train_indices]
+            dev_y = train_y[dev_indices]
+            train_y = train_y[train_indices]
+            dev_hier_x = train_hier_x[dev_indices]
+            train_hier_x = train_hier_x[train_indices]
+        train_x = [ embedding_layer.map_to_ids(x) for x in train_x_text ]
 
     if args.dev:
         #dev_x, dev_y = read_corpus(args.dev)
@@ -546,10 +567,12 @@ def main(args):
                     nclasses = len(train_y[0]) #max(train_y.data)+1
             )
         model.ready()
+        print train_x[0].dtype, train_hier_x[0].dtype, dev_hier_x[0].dtype, test_hier_x[0].dtype
         model.train(
                 (train_x, train_y),
                 (dev_x, dev_y) if args.dev else None,
                 (test_x, test_y) if args.test else None,
+                (train_hier_x, dev_hier_x, test_hier_x) if args.use_hier else None
             )
 
 
@@ -634,7 +657,7 @@ if __name__ == "__main__":
         )
     argparser.add_argument("--layer",
             type = str,
-            default = "strcnn"
+            default = "rcnn"
         )
     argparser.add_argument("--mode",
             type = int,
@@ -654,6 +677,10 @@ if __name__ == "__main__":
             type = int,
             default = 1,
             help = "whether to use mean pooling or take the last vector"
+        )
+    argparser.add_argument("--use_hier",
+            action='store_true',
+            help = "use hierarchy"
         )
     args = argparser.parse_args()
     main(args)
