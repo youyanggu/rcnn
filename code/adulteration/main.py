@@ -42,12 +42,12 @@ def read_corpus_adulterants():
             corpus_x.append(tokens)
         else:
             corpus_x.append([])
-        hier_x.append(hier.astype('float32'))
+        hier_x.append(hier)
         normalized = out*1. / out.sum()
         assert np.isclose(normalized.sum(), 1, atol=1e-5)
-        corpus_y.append(normalized.astype('float32'))
+        corpus_y.append(normalized)
         #len_corpus_y.append(out.sum())
-    assert len(corpus_x)==len(corpus_y)
+    assert len(corpus_x)==len(corpus_y)==len(hier_x)
     return np.array(corpus_x), np.array(corpus_y).astype('float32'), np.array(hier_x).astype('float32')
 
 def read_corpus_ingredients(num_ingredients=5000):
@@ -77,10 +77,10 @@ def read_corpus_ingredients(num_ingredients=5000):
             corpus_x.append(tokens)
         else:
             corpus_x.append([])
-        hier_x.append(hier.astype('float32'))
+        hier_x.append(hier)
         normalized = out*1. / out.sum()
         assert np.isclose(normalized.sum(), 1, atol=1e-5)
-        corpus_y.append(normalized.astype('float32'))
+        corpus_y.append(normalized)
         #len_corpus_y.append(out.sum())
     assert len(corpus_x)==len(corpus_y)==len(hier_x)
     #corpus_y = scipy.sparse.csr_matrix((y_data, y_indices, np.cumsum(y_indptr)))
@@ -98,9 +98,12 @@ def read_corpus(path):
 def create_one_batch(ids, x, y, hier):
     batch_x = np.column_stack( [ x[i] for i in ids ] )
     batch_y = np.array( [ y[i] for i in ids ] )
-    batch_hier = np.array( [ hier[i] for i in ids ] ) if hier is not None else None
+    if hier is None:
+        batch_hier = np.column_stack( [[] for i in ids] ).astype('float32')
+    else:
+        batch_hier = np.column_stack( [ hier[i] for i in ids ] )
     #batch_y = y[ids]
-    assert batch_x.shape[1] == batch_y.shape[0] == batch_hier.shape[0]
+    assert batch_x.shape[1] == batch_y.shape[0]
     return batch_x, batch_y, batch_hier
 
 # shuffle training examples and create mini-batches
@@ -156,7 +159,7 @@ def save_predictions(predict_model, train, dev, test):
         np.save('{}_pred.npy'.format(data_name), np.array(results))
 
 
-def evaluate(x_data, y_data, predict_model):
+def evaluate(x_data, y_data, hier_x, predict_model):
     """Compute the MAP of the data."""
     ing_cat_pair_map = {}
     for x_idx, x in enumerate(x_data):
@@ -167,7 +170,12 @@ def evaluate(x_data, y_data, predict_model):
     valid_ing_indices, results = [], []
     for x_idx, x_for_predict in enumerate(x_data):
         if len(x_for_predict) > 0:
-            p_y_given_x = predict_model(np.vstack(x_for_predict))[0]
+            if hier_x is not None:
+                p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                    np.vstack(hier_x[x_idx]))[0]
+            else:
+                p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                    np.column_stack([[]]))[0]
             valid_ing_indices.append(x_idx)
             results.append(p_y_given_x)
     valid_ing_indices = np.array(valid_ing_indices)
@@ -198,19 +206,23 @@ class Model:
 
         # x is length * batch_size
         # y is batch_size * num_cats
-        # hier is batch_size * hier_dim
         self.x = T.imatrix('x')
-        self.hier = T.fmatrix('hier')
         #self.y = T.ivector('y')
         self.y = T.fmatrix('y')
         self.y_len = T.ivector()
-
         x = self.x
         y = self.y
-        hier = self.hier
         y_len = self.y_len
         n_hidden = self.n_hidden
         n_in = self.n_in
+
+        # hier is batch_size * hier_dim
+        self.hier = T.fmatrix('hier')
+        hier = self.hier
+        if args.use_hier:
+            size = 3751 # HIER CODE
+        else:
+            size = 0
 
         # fetch word embeddings
         # (len * batch_size) * n_in
@@ -226,7 +238,7 @@ class Model:
         layers = self.layers = [ ]
         prev_output = slices
         prev_output = apply_dropout(prev_output, dropout, v2=True)
-        size = 0
+
         softmax_inputs = [ ]
         activation = get_activation_by_name(args.act)
         for i in range(depth):
@@ -266,17 +278,14 @@ class Model:
             prev_output = apply_dropout(prev_output, dropout)
             size += n_hidden
 
+        softmax_inputs.append(hier.T)
+
         # final feature representation is the concatenation of all extraction layers
         if pooling:
             softmax_input = T.concatenate(softmax_inputs, axis=1) / x.shape[0]
         else:
             softmax_input = T.concatenate(softmax_inputs, axis=1)
         
-        # HIER CODE
-        #hier = T.sum(hier, axis=0) / x.shape[0]
-        #softmax_input = T.concatenate([softmax_input, hier], axis=0)
-        ###
-
         softmax_input = apply_dropout(softmax_input, dropout, v2=True)
 
         # feed the feature repr. to the softmax output layer
@@ -357,7 +366,7 @@ class Model:
         print "I AM HERE"
         args = self.args
         trainx, trainy = train
-        if hier is None:
+        if hier is None or not args.use_hier:
             train_hier_x, dev_hier_x, test_hier_x = None, None, None
         else:
             train_hier_x, dev_hier_x, test_hier_x = hier
@@ -391,7 +400,7 @@ class Model:
             )[:3]
         print "I AM HERE"
         train_model = theano.function(
-             inputs = [self.x, self.y],#, self.hier],
+             inputs = [self.x, self.y, self.hier],
              outputs = [ cost, gnorm ],
              updates = updates,
              allow_input_downcast = True
@@ -427,7 +436,8 @@ class Model:
             train_loss = 0.0
 
             random.shuffle(perm)
-            batches_x, batches_y, batches_hier = create_batches(perm, trainx, trainy, train_hier_x, batch_size)
+            batches_x, batches_y, batches_hier = create_batches(
+                perm, trainx, trainy, train_hier_x, batch_size)
             print "I AM HERE"
             N = len(batches_x)
             for i in xrange(N):
@@ -445,9 +455,9 @@ class Model:
                 assert x.dtype in ['float32', 'int32']
                 assert y.dtype in ['float32', 'int32']
                 assert hier.dtype in ['float32', 'int32']
-                print x[0]
-                print y[0]
-                print hier[0]
+                #print x.shape
+                #print y.shape
+                #print hier.shape
                 va, grad_norm = train_model(x, y, hier)
                 train_loss += va
 
@@ -506,11 +516,11 @@ class Model:
             #        p_y_given_x = predict_model(np.vstack(x_for_predict))
             #        print x_idx, p_y_given_x
             print "======= Training evaluation ========"
-            evaluate(trainx, trainy, predict_model)
+            evaluate(trainx, trainy, train_hier_x, predict_model)
             print "======= Validation evaluation ========"
-            evaluate(dev[0], dev[1], predict_model)
+            evaluate(dev[0], dev[1], dev_hier_x, predict_model)
             print "======= Adulteration evaluation ========"
-            evaluate(test[0], test[1], predict_model)
+            evaluate(test[0], test[1], test_hier_x, predict_model)
 
         save_predictions(predict_model, train, dev, test)
 
@@ -548,8 +558,9 @@ def main(args):
             train_x_text = train_x_text[train_indices]
             dev_y = train_y[dev_indices]
             train_y = train_y[train_indices]
-            dev_hier_x = train_hier_x[dev_indices]
-            train_hier_x = train_hier_x[train_indices]
+            if len(train_hier_x) > 0:
+                dev_hier_x = train_hier_x[dev_indices]
+                train_hier_x = train_hier_x[train_indices]
         train_x = [ embedding_layer.map_to_ids(x) for x in train_x_text ]
 
     if args.dev:
@@ -567,7 +578,7 @@ def main(args):
                     nclasses = len(train_y[0]) #max(train_y.data)+1
             )
         model.ready()
-        print train_x[0].dtype, train_hier_x[0].dtype, dev_hier_x[0].dtype, test_hier_x[0].dtype
+        #print train_x[0].dtype, train_hier_x[0].dtype, dev_hier_x[0].dtype, test_hier_x[0].dtype
         model.train(
                 (train_x, train_y),
                 (dev_x, dev_y) if args.dev else None,
@@ -684,5 +695,4 @@ if __name__ == "__main__":
         )
     args = argparser.parse_args()
     main(args)
-
 
