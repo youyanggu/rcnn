@@ -144,16 +144,22 @@ def create_batches(perm, x, y, hier, batch_size):
     assert len(batches_x) == len(batches_y) == len(batches_hier)
     return batches_x, batches_y, batches_hier
 
-def save_predictions(predict_model, train, dev, test):
+def save_predictions(predict_model, train, dev, test, hier):
     trainx, trainy = train
     devx, devy = dev
     testx, testy = test
-    for x_data, data_name in [(trainx, 'train'), (devx, 'dev'), (testx, 'test')]:
+    hier_train, hier_dev, hier_test = hier
+    for x_data, data_name, hier_x in [(
+        trainx, 'train', hier_train), (devx, 'dev', hier_dev), (testx, 'test', hier_test)]:
         results = []
         for x_idx, x_for_predict in enumerate(x_data):
             if len(x_for_predict) > 0:
-                p_y_given_x = predict_model(np.vstack(x_for_predict))[0]
-                results.append(p_y_given_x)
+                if hier_x is not None:
+                    p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                        np.vstack(hier_x[x_idx]))[0]
+                else:
+                    p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                        np.column_stack([[]]))[0]
             else:
                 results.append(np.zeros(len(results[0])))
         np.save('{}_pred.npy'.format(data_name), np.array(results))
@@ -367,9 +373,8 @@ class Model:
         args = self.args
         trainx, trainy = train
         if hier is None or not args.use_hier:
-            train_hier_x, dev_hier_x, test_hier_x = None, None, None
-        else:
-            train_hier_x, dev_hier_x, test_hier_x = hier
+            hier = (None, None, None)
+        train_hier_x, dev_hier_x, test_hier_x = hier
         batch_size = args.batch
 
         if dev:
@@ -522,7 +527,7 @@ class Model:
             print "======= Adulteration evaluation ========"
             evaluate(test[0], test[1], test_hier_x, predict_model)
 
-        save_predictions(predict_model, train, dev, test)
+        save_predictions(predict_model, train, dev, test, hier)
 
 
 def main(args):
