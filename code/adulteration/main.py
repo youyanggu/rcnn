@@ -22,6 +22,13 @@ from wikipedia import *
 np.set_printoptions(precision=3)
 wiki_path = '../../../adulteration/wikipedia/'
 
+def read_corpus_products():
+    with open('../../../adulteration/ncim/idx_to_cat.pkl', 'rb') as f_in:
+        idx_to_cat = pickle.load(f_in)
+    products = [idx_to_cat[i] for i in sorted(idx_to_cat.keys())]
+    tokens = input_to_tokens(ings=products)
+    return tokens
+
 def read_corpus_adulterants():
     with open(wiki_path+'input_to_outputs_adulterants.pkl', 'r') as f_in:
         input_to_outputs = pickle.load(f_in)
@@ -299,7 +306,7 @@ class Model:
                 n_in = size,
                 n_out = self.nclasses,
                 activation = softmax,
-                has_bias = False
+                has_bias = False,
         ) )
 
         for l,i in zip(layers, range(len(layers))):
@@ -368,8 +375,7 @@ class Model:
         return fine/fine_tot
 
 
-    def train(self, train, dev, test, hier):
-        print "I AM HERE"
+    def train(self, train, dev, test, hier, products):
         args = self.args
         trainx, trainy = train
         if hier is None or not args.use_hier:
@@ -403,27 +409,23 @@ class Model:
                 lr = args.learning_rate,
                 method = args.learning
             )[:3]
-        print "I AM HERE"
         train_model = theano.function(
              inputs = [self.x, self.y, self.hier],
              outputs = [ cost, gnorm ],
              updates = updates,
              allow_input_downcast = True
         )
-        print "I AM HERE"
         predict_model = theano.function(
              inputs = [self.x, self.hier],
              outputs = self.p_y_given_x,
              allow_input_downcast = True
         )
-        print "I AM HERE"
 
         eval_acc = theano.function(
              inputs = [self.x, self.hier],
              outputs = self.pred,
              allow_input_downcast = True
         )
-        print "I AM HERE"
         unchanged = 0
         best_dev = 0.0
         dropout_prob = np.float64(args.dropout_rate).astype(theano.config.floatX)
@@ -551,6 +553,11 @@ def main(args):
                 embs = embedding       
             )
 
+    products = None
+    if args.product:
+        products_text = read_corpus_products()
+        products = [ embedding_layer.map_to_ids(x) for x in products_text ]
+
     train_hier_x = dev_hier_x = test_hier_x = None
     if args.train:
         train_x_text, train_y, train_hier_x = read_corpus_ingredients()
@@ -588,7 +595,8 @@ def main(args):
                 (train_x, train_y),
                 (dev_x, dev_y) if args.dev else None,
                 (test_x, test_y) if args.test else None,
-                (train_hier_x, dev_hier_x, test_hier_x) if args.use_hier else None
+                (train_hier_x, dev_hier_x, test_hier_x) if args.use_hier else None,
+                products
             )
 
 
@@ -697,6 +705,10 @@ if __name__ == "__main__":
     argparser.add_argument("--use_hier",
             action='store_true',
             help = "use hierarchy"
+        )
+    argparser.add_argument("--product",
+            action='store_true',
+            help = "use product categories"
         )
     args = argparser.parse_args()
     main(args)
