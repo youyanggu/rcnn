@@ -30,7 +30,7 @@ def create_product_mask(products_len, n_hidden):
         mask.append(np.tile(row, (n_hidden,1)).T)
     mask = np.array(mask)
     mask = np.swapaxes(mask, 0,1)
-    return mask
+    return mask.astype('int32')
 
 def read_corpus_products():
     with open('../../../adulteration/ncim/idx_to_cat.pkl', 'rb') as f_in:
@@ -190,7 +190,7 @@ def save_predictions(predict_model, train, dev, test, hier):
         np.save('{}_pred.npy'.format(data_name), np.array(results))
 
 
-def evaluate(x_data, y_data, hier_x, predict_model):
+def evaluate(x_data, y_data, hier_x, products, predict_model):
     """Compute the MAP of the data."""
     ing_cat_pair_map = {}
     for x_idx, x in enumerate(x_data):
@@ -202,11 +202,19 @@ def evaluate(x_data, y_data, hier_x, predict_model):
     for x_idx, x_for_predict in enumerate(x_data):
         if len(x_for_predict) > 0:
             if hier_x is not None:
-                p_y_given_x = predict_model(np.vstack(x_for_predict), 
-                    np.vstack(hier_x[x_idx]))[0]
+                if products is None:
+                    p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                        np.vstack(hier_x[x_idx]))[0]
+                else:
+                    p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                        np.vstack(hier_x[x_idx]), products)[0]
             else:
-                p_y_given_x = predict_model(np.vstack(x_for_predict), 
-                    np.column_stack([[]]))[0]
+                if products is None:
+                    p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                        np.column_stack([[]]))[0]
+                else:
+                    p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                        np.column_stack([[]]), products)[0]
             valid_ing_indices.append(x_idx)
             results.append(p_y_given_x)
     valid_ing_indices = np.array(valid_ing_indices)
@@ -330,8 +338,8 @@ class Model:
                     inter_result = inter_result / products_len[:,None]
                     softmax_inputs_prod.append(inter_result) # summing over columns
                 else:
-                    #inter_result = prev_output_prod[-1]
-                    inter_result = prev_output_prod[products_len,np.arange(131),:]
+                    inter_result = prev_output_prod[-1]
+                    #inter_result = prev_output_prod[products_len.astype('int32'),np.arange(131),:]
                     softmax_inputs_prod.append(inter_result)
                 prev_output_prod = apply_dropout(prev_output_prod, dropout)
                 size_prod += n_hidden
@@ -541,6 +549,7 @@ class Model:
                 #print hier.shape
                 if products is not None:
                     #print products.shape
+                    assert products.dtype in ['float32', 'int32']
                     va, grad_norm = train_model(x, y, hier, products)
                 else:
                     va, grad_norm = train_model(x, y, hier)
@@ -609,11 +618,11 @@ class Model:
             #        p_y_given_x = predict_model(np.vstack(x_for_predict))
             #        print x_idx, p_y_given_x
             print "======= Training evaluation ========"
-            evaluate(trainx, trainy, train_hier_x, predict_model)
+            evaluate(trainx, trainy, train_hier_x, products, predict_model)
             print "======= Validation evaluation ========"
-            evaluate(dev[0], dev[1], dev_hier_x, predict_model)
+            evaluate(dev[0], dev[1], dev_hier_x, products, predict_model)
             print "======= Adulteration evaluation ========"
-            evaluate(test[0], test[1], test_hier_x, predict_model)
+            evaluate(test[0], test[1], test_hier_x, products, predict_model)
 
         save_predictions(predict_model, train, dev, test, hier)
 
