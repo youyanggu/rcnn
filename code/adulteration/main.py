@@ -617,12 +617,18 @@ class Model:
             #    if len(x_for_predict) > 0:
             #        p_y_given_x = predict_model(np.vstack(x_for_predict))
             #        print x_idx, p_y_given_x
-            print "======= Training evaluation ========"
-            evaluate(trainx, trainy, train_hier_x, products, predict_model)
-            print "======= Validation evaluation ========"
-            evaluate(dev[0], dev[1], dev_hier_x, products, predict_model)
-            print "======= Adulteration evaluation ========"
-            evaluate(test[0], test[1], test_hier_x, products, predict_model)
+            if epoch % 10 == 5:
+                evaluate_start_time = time.time()
+                print "======= Training evaluation ========"
+                evaluate(trainx, trainy, train_hier_x, products, predict_model)
+                if dev:
+                    print "======= Validation evaluation ========"
+                    evaluate(dev[0], dev[1], dev_hier_x, products, predict_model)
+                if test:
+                    print "======= Adulteration evaluation ========"
+                    evaluate(test[0], test[1], test_hier_x, products, predict_model)
+                print "Evaluate time: {:.1f}m".format((time.time()-evaluate_start_time)/60)
+                start_time = time.time()
 
         save_predictions(predict_model, train, dev, test, hier)
 
