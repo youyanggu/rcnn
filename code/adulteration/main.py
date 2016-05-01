@@ -22,12 +22,29 @@ from wikipedia import *
 np.set_printoptions(precision=3)
 wiki_path = '../../../adulteration/wikipedia/'
 
+def create_product_mask(products_len, n_hidden):
+    mask = []
+    max_len = products_len.max()
+    for l in products_len:
+        row = np.pad(np.ones(l), pad_width=(0,max_len-l), mode='constant', constant_values=0)
+        mask.append(np.tile(row, (n_hidden,1)).T)
+    mask = np.array(mask)
+    mask = np.swapaxes(mask, 0,1)
+    return mask
+
 def read_corpus_products():
     with open('../../../adulteration/ncim/idx_to_cat.pkl', 'rb') as f_in:
         idx_to_cat = pickle.load(f_in)
     products = [idx_to_cat[i] for i in sorted(idx_to_cat.keys())]
     tokens = input_to_tokens(ings=products)
-    return tokens
+    # Add padding
+    products_len = np.array([len(i) for i in tokens])
+    max_len = products_len.max()
+    new_tokens = []
+    for t in tokens:
+        num_pads = max_len - len(t)
+        new_tokens.append(t+num_pads*['<pad>'])
+    return new_tokens, products_len
 
 def read_corpus_adulterants():
     with open(wiki_path+'input_to_outputs_adulterants.pkl', 'r') as f_in:
@@ -101,6 +118,7 @@ def read_corpus(path):
     corpus_x = [ x[1:] for x in lines ]
     corpus_y = [ int(x[0]) for x in lines ]
     return corpus_x, corpus_y
+
 
 def create_one_batch(ids, x, y, hier):
     batch_x = np.column_stack( [ x[i] for i in ids ] )
@@ -203,10 +221,11 @@ def evaluate(x_data, y_data, hier_x, predict_model):
     scoring.evaluate_map(valid_ing_indices, results, ing_cat_pair_map, random=False)
 
 class Model:
-    def __init__(self, args, embedding_layer, nclasses):
+    def __init__(self, args, embedding_layer, nclasses, products_len):
         self.args = args
         self.embedding_layer = embedding_layer
         self.nclasses = nclasses
+        self.products_len = products_len
 
     def ready(self):
         args = self.args
@@ -236,6 +255,7 @@ class Model:
             size = 3751 # HIER CODE
         else:
             size = 0
+        size_prod = 0
 
         # fetch word embeddings
         # (len * batch_size) * n_in
@@ -252,7 +272,18 @@ class Model:
         prev_output = slices
         prev_output = apply_dropout(prev_output, dropout, v2=True)
 
+        if args.products:
+            self.products = T.imatrix('products')
+            products = self.products
+            slices_prod = embedding_layer.forward(products.ravel())
+            slices_prod = slices_prod.reshape( (products.shape[0], products.shape[1], n_in) )
+            prev_output_prod = apply_dropout(slices_prod, dropout, v2=True)
+            products_len = theano.shared(self.products_len.astype(theano.config.floatX))
+            products_len_mask = create_product_mask(self.products_len, n_hidden)
+            products_len_mask = theano.shared(products_len_mask.astype(theano.config.floatX))
+
         softmax_inputs = [ ]
+        softmax_inputs_prod = [ ]
         activation = get_activation_by_name(args.act)
         for i in range(depth):
             if args.layer.lower() == "lstm":
@@ -291,6 +322,20 @@ class Model:
             prev_output = apply_dropout(prev_output, dropout)
             size += n_hidden
 
+            if args.products:
+                prev_output_prod = layer.forward_all(prev_output_prod)
+                if pooling:
+                    inter_result = prev_output_prod * products_len_mask
+                    inter_result = T.sum(inter_result, axis=0)
+                    inter_result = inter_result / products_len[:,None]
+                    softmax_inputs_prod.append(inter_result) # summing over columns
+                else:
+                    #inter_result = prev_output_prod[-1]
+                    inter_result = prev_output_prod[products_len,np.arange(131),:]
+                    softmax_inputs_prod.append(inter_result)
+                prev_output_prod = apply_dropout(prev_output_prod, dropout)
+                size_prod += n_hidden
+
         softmax_inputs.append(hier.T)
 
         # final feature representation is the concatenation of all extraction layers
@@ -298,24 +343,37 @@ class Model:
             softmax_input = T.concatenate(softmax_inputs, axis=1) / x.shape[0]
         else:
             softmax_input = T.concatenate(softmax_inputs, axis=1)
-        
         softmax_input = apply_dropout(softmax_input, dropout, v2=True)
 
-        # feed the feature repr. to the softmax output layer
-        layers.append( Layer(
-                n_in = size,
-                n_out = self.nclasses,
-                activation = softmax,
-                has_bias = False,
-        ) )
+        if args.products:
+            if pooling:
+                softmax_inputs_prod = T.concatenate(softmax_inputs_prod, axis=1)# / products.shape[0]
+            else:
+                softmax_inputs_prod = T.concatenate(softmax_inputs_prod, axis=1)
+            softmax_inputs_prod = apply_dropout(softmax_inputs_prod, dropout, v2=True)
+
+        if not args.products:
+            # feed the feature repr. to the softmax output layer
+            layers.append( Layer(
+                    n_in = size+size_prod,
+                    n_out = self.nclasses,
+                    activation = softmax,
+                    has_bias = False,
+            ) )
 
         for l,i in zip(layers, range(len(layers))):
             say("layer {}: n_in={}\tn_out={}\n".format(
                 i, l.n_in, l.n_out
             ))
 
+        self.softmax_input = softmax_input
+
         # unnormalized score of y given x
-        self.p_y_given_x = layers[-1].forward(softmax_input)
+        if args.products:
+            softmax_input = T.dot(softmax_input, softmax_inputs_prod.T)
+            self.p_y_given_x = softmax(softmax_input)
+        else:
+            self.p_y_given_x = layers[-1].forward(softmax_input)
         self.pred = T.argmax(self.p_y_given_x, axis=1)
 
         self.nll_loss = T.mean( T.nnet.categorical_crossentropy(
@@ -383,6 +441,12 @@ class Model:
         train_hier_x, dev_hier_x, test_hier_x = hier
         batch_size = args.batch
 
+        #if products is None:
+        #    products = [[] for i in range(131)]
+        if products is not None:
+            products = np.column_stack(products)
+        blank_product_hier = np.column_stack( [[] for i in range(131)] )
+
         if dev:
             dev_batches_x, dev_batches_y, dev_batches_hier = create_batches(
                     range(len(dev[0])),
@@ -409,20 +473,32 @@ class Model:
                 lr = args.learning_rate,
                 method = args.learning
             )[:3]
+        if products is not None:
+            inputs = [self.x, self.y, self.hier, self.products]
+            predict_inputs = [self.x, self.hier, self.products]
+        else:
+            inputs = [self.x, self.y, self.hier]
+            predict_inputs = [self.x, self.hier]
         train_model = theano.function(
-             inputs = [self.x, self.y, self.hier],
+             inputs = inputs,
              outputs = [ cost, gnorm ],
              updates = updates,
              allow_input_downcast = True
         )
         predict_model = theano.function(
-             inputs = [self.x, self.hier],
+             inputs = predict_inputs,
              outputs = self.p_y_given_x,
              allow_input_downcast = True
         )
-
+        """
+        get_representation = theano.function(
+             inputs = [self.x, self.hier, self.products],
+             outputs = self.softmax_input,
+             allow_input_downcast = True
+        )
+        """
         eval_acc = theano.function(
-             inputs = [self.x, self.hier],
+             inputs = predict_inputs,
              outputs = self.pred,
              allow_input_downcast = True
         )
@@ -437,7 +513,6 @@ class Model:
 
         say(str([ "%.2f" % np.linalg.norm(x.get_value(borrow=True)) for x in self.params ])+"\n")
         for epoch in xrange(args.max_epochs):
-            print "I AM HERE"
             unchanged += 1
             #if dev and unchanged > 30: return
             train_loss = 0.0
@@ -445,7 +520,6 @@ class Model:
             random.shuffle(perm)
             batches_x, batches_y, batches_hier = create_batches(
                 perm, trainx, trainy, train_hier_x, batch_size)
-            print "I AM HERE"
             N = len(batches_x)
             for i in xrange(N):
 
@@ -465,8 +539,20 @@ class Model:
                 #print x.shape
                 #print y.shape
                 #print hier.shape
-                va, grad_norm = train_model(x, y, hier)
+                if products is not None:
+                    #print products.shape
+                    va, grad_norm = train_model(x, y, hier, products)
+                else:
+                    va, grad_norm = train_model(x, y, hier)
                 train_loss += va
+                
+                #if products is not None:
+                #    print x.shape, hier.shape, np.array(products[0:1]).T.shape, hier[:,0:1].shape
+                
+                #print i, N
+                #if products is not None:
+                #    prod_rep = get_representation(products, blank_product_hier)
+                #    print prod_rep
 
                 # debug
                 if math.isnan(va):
@@ -553,9 +639,9 @@ def main(args):
                 embs = embedding       
             )
 
-    products = None
-    if args.product:
-        products_text = read_corpus_products()
+    products, products_len = None, None
+    if args.products:
+        products_text, products_len = read_corpus_products()
         products = [ embedding_layer.map_to_ids(x) for x in products_text ]
 
     train_hier_x = dev_hier_x = test_hier_x = None
@@ -587,7 +673,8 @@ def main(args):
         model = Model(
                     args = args,
                     embedding_layer = embedding_layer,
-                    nclasses = len(train_y[0]) #max(train_y.data)+1
+                    nclasses = len(train_y[0]), #max(train_y.data)+1
+                    products_len = products_len,
             )
         model.ready()
         #print train_x[0].dtype, train_hier_x[0].dtype, dev_hier_x[0].dtype, test_hier_x[0].dtype
@@ -706,7 +793,7 @@ if __name__ == "__main__":
             action='store_true',
             help = "use hierarchy"
         )
-    argparser.add_argument("--product",
+    argparser.add_argument("--products",
             action='store_true',
             help = "use product categories"
         )
