@@ -360,14 +360,18 @@ class Model:
                 softmax_inputs_prod = T.concatenate(softmax_inputs_prod, axis=1)
             softmax_inputs_prod = apply_dropout(softmax_inputs_prod, dropout, v2=True)
 
-        if not args.products:
+        #if not args.products:
             # feed the feature repr. to the softmax output layer
-            layers.append( Layer(
-                    n_in = size+size_prod,
-                    n_out = self.nclasses,
-                    activation = softmax,
-                    has_bias = False,
-            ) )
+        if args.product:
+            softmax_n_in = 131 #size+size_prod
+        else:
+            softmax_n_in = size
+        layers.append( Layer(
+                n_in = softmax_n_in,
+                n_out = self.nclasses,
+                activation = softmax,
+                has_bias = False,
+        ) )
 
         for l,i in zip(layers, range(len(layers))):
             say("layer {}: n_in={}\tn_out={}\n".format(
@@ -379,9 +383,9 @@ class Model:
         # unnormalized score of y given x
         if args.products:
             softmax_input = T.dot(softmax_input, softmax_inputs_prod.T)
-            self.p_y_given_x = softmax(softmax_input)
-        else:
-            self.p_y_given_x = layers[-1].forward(softmax_input)
+            #self.p_y_given_x = softmax(softmax_input)
+        #else:
+        self.p_y_given_x = layers[-1].forward(softmax_input)
         self.pred = T.argmax(self.p_y_given_x, axis=1)
 
         self.nll_loss = T.mean( T.nnet.categorical_crossentropy(
@@ -537,26 +541,26 @@ class Model:
 
                 x = batches_x[i]
                 y = batches_y[i]
-                hier = batches_hier[i]
+                hier_x = batches_hier[i]
                 y_len = np.array([j.sum() for j in batches_y[i]])
                 #y = y.toarray()
 
                 assert x.dtype in ['float32', 'int32']
                 assert y.dtype in ['float32', 'int32']
-                assert hier.dtype in ['float32', 'int32']
+                assert hier_x.dtype in ['float32', 'int32']
                 #print x.shape
                 #print y.shape
-                #print hier.shape
+                #print hier_x.shape
                 if products is not None:
                     #print products.shape
                     assert products.dtype in ['float32', 'int32']
-                    va, grad_norm = train_model(x, y, hier, products)
+                    va, grad_norm = train_model(x, y, hier_x, products)
                 else:
-                    va, grad_norm = train_model(x, y, hier)
+                    va, grad_norm = train_model(x, y, hier_x)
                 train_loss += va
                 
                 #if products is not None:
-                #    print x.shape, hier.shape, np.array(products[0:1]).T.shape, hier[:,0:1].shape
+                #    print x.shape, hier_x.shape, np.array(products[0:1]).T.shape, hier_x[:,0:1].shape
                 
                 #print i, N
                 #if products is not None:
