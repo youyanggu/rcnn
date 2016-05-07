@@ -24,14 +24,15 @@ np.set_printoptions(precision=3)
 wiki_path = '../../../adulteration/wikipedia/'
 
 def reduce_dim(train_hier_x, n_components, saved=True):
-    if saved and os.path.isfile('pca.pkl'):
-        with open('pca.pkl', 'r') as f:
-            pca = pickle.loads(f)
+    fname = 'pca_{}.pkl'.format(n_components)
+    if saved and os.path.isfile(fname):
+        with open(fname, 'r') as f:
+            pca = pickle.load(f)
         train_hier_x_new = pca.transform(train_hier_x)
     else:
         pca = PCA(n_components=n_components)
         train_hier_x_new = pca.fit_transform(train_hier_x)
-        with open('pca.pkl', 'w') as f:
+        with open(fname, 'w') as f:
             pickle.dump(pca, f)
     return train_hier_x_new
 
@@ -182,7 +183,9 @@ def create_batches(perm, x, y, hier, batch_size):
     assert len(batches_x) == len(batches_y) == len(batches_hier)
     return batches_x, batches_y, batches_hier
 
-def save_predictions(predict_model, train, dev, test, hier, products):
+def save_predictions(predict_model, train, dev, test, hier, products, label):
+    if not label:
+        label = str(int(time.time()))
     trainx, trainy = train
     devx, devy = dev
     testx, testy = test
@@ -199,9 +202,17 @@ def save_predictions(predict_model, train, dev, test, hier, products):
                     else:
                         p_y_given_x = predict_model(np.vstack(x_for_predict), 
                             np.vstack(hier_x[x_idx]), products)[0]
+                else:
+                    if products is None:
+                        p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                            np.column_stack([[]]))[0]
+                    else:
+                        p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                            np.column_stack([[]]), products)[0]
+                results.append(p_y_given_x)
             else:
                 results.append(np.zeros(len(results[0])))
-        np.save('{}_pred.npy'.format(data_name), np.array(results))
+        np.save('predictions/{}_{}_pred.npy'.format(label, data_name), np.array(results))
 
 
 def evaluate(x_data, y_data, hier_x, products, predict_model):
@@ -392,14 +403,13 @@ class Model:
                 i, l.n_in, l.n_out
             ))
 
-        self.softmax_input = softmax_input
-
         # unnormalized score of y given x
         if args.products:
             softmax_input = T.dot(softmax_input, softmax_inputs_prod.T)
             self.p_y_given_x = softmax(softmax_input)
         else:
             self.p_y_given_x = layers[-1].forward(softmax_input)
+        self.softmax_input = softmax_input
         self.pred = T.argmax(self.p_y_given_x, axis=1)
 
         self.nll_loss = T.mean( T.nnet.categorical_crossentropy(
@@ -516,13 +526,11 @@ class Model:
              outputs = self.p_y_given_x,
              allow_input_downcast = True
         )
-        """
         get_representation = theano.function(
-             inputs = [self.x, self.hier, self.products],
+             inputs = predict_inputs,
              outputs = self.softmax_input,
              allow_input_downcast = True
         )
-        """
         eval_acc = theano.function(
              inputs = predict_inputs,
              outputs = self.pred,
@@ -637,6 +645,7 @@ class Model:
             #        print x_idx, p_y_given_x
             if epoch % 10 == 0 or epoch == args.max_epochs-1:
                 evaluate_start_time = time.time()
+                print "\nEpoch:", epoch
                 print "======= Training evaluation ========"
                 evaluate(trainx, trainy, train_hier_x, products, predict_model)
                 if dev:
@@ -648,7 +657,7 @@ class Model:
                 print "Evaluate time: {:.1f}m".format((time.time()-evaluate_start_time)/60)
                 start_time = time.time()
 
-        save_predictions(predict_model, train, dev, test, hier)
+        save_predictions(get_representation, train, dev, test, hier, args.label)
 
 
 def main(args):
@@ -831,6 +840,11 @@ if __name__ == "__main__":
     argparser.add_argument("--products",
             action='store_true',
             help = "use product categories"
+        )
+    argparser.add_argument("--label",
+            type = str,
+            default = "",
+            help = "label for saving predictions"
         )
     args = argparser.parse_args()
     main(args)
