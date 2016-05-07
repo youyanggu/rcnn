@@ -5,6 +5,7 @@ from collections import Counter
 import numpy as np
 import scipy
 from sklearn.cross_validation import train_test_split
+from sklearn.decomposition import PCA
 import theano
 import theano.tensor as T
 
@@ -21,6 +22,18 @@ from wikipedia import *
 
 np.set_printoptions(precision=3)
 wiki_path = '../../../adulteration/wikipedia/'
+
+def reduce_dim(train_hier_x, n_components, saved=False):
+    if saved:
+        with open('pca.pkl', 'r') as f:
+            pca = pickle.loads(f)
+        train_hier_x_new = pca.transform(train_hier_x)
+    else:
+        pca = PCA(n_components=n_components)
+        train_hier_x_new = pca.fit_transform(train_hier_x)
+         with open('pca.pkl', 'w') as f:
+            pickle.dump(pca, f)
+    return train_hier_x_new
 
 def create_product_mask(products_len, n_hidden):
     mask = []
@@ -169,7 +182,7 @@ def create_batches(perm, x, y, hier, batch_size):
     assert len(batches_x) == len(batches_y) == len(batches_hier)
     return batches_x, batches_y, batches_hier
 
-def save_predictions(predict_model, train, dev, test, hier):
+def save_predictions(predict_model, train, dev, test, hier, products):
     trainx, trainy = train
     devx, devy = dev
     testx, testy = test
@@ -180,11 +193,12 @@ def save_predictions(predict_model, train, dev, test, hier):
         for x_idx, x_for_predict in enumerate(x_data):
             if len(x_for_predict) > 0:
                 if hier_x is not None:
-                    p_y_given_x = predict_model(np.vstack(x_for_predict), 
-                        np.vstack(hier_x[x_idx]))[0]
-                else:
-                    p_y_given_x = predict_model(np.vstack(x_for_predict), 
-                        np.column_stack([[]]))[0]
+                    if products is None:
+                        p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                            np.vstack(hier_x[x_idx]))[0]
+                    else:
+                        p_y_given_x = predict_model(np.vstack(x_for_predict), 
+                            np.vstack(hier_x[x_idx]), products)[0]
             else:
                 results.append(np.zeros(len(results[0])))
         np.save('{}_pred.npy'.format(data_name), np.array(results))
@@ -362,16 +376,16 @@ class Model:
 
         #if not args.products:
             # feed the feature repr. to the softmax output layer
-        if args.product:
+        if args.products:
             softmax_n_in = 131 #size+size_prod
         else:
             softmax_n_in = size
-        layers.append( Layer(
-                n_in = softmax_n_in,
-                n_out = self.nclasses,
-                activation = softmax,
-                has_bias = False,
-        ) )
+            layers.append( Layer(
+                    n_in = softmax_n_in,
+                    n_out = self.nclasses,
+                    activation = softmax,
+                    has_bias = False,
+            ) )
 
         for l,i in zip(layers, range(len(layers))):
             say("layer {}: n_in={}\tn_out={}\n".format(
@@ -383,9 +397,9 @@ class Model:
         # unnormalized score of y given x
         if args.products:
             softmax_input = T.dot(softmax_input, softmax_inputs_prod.T)
-            #self.p_y_given_x = softmax(softmax_input)
-        #else:
-        self.p_y_given_x = layers[-1].forward(softmax_input)
+            self.p_y_given_x = softmax(softmax_input)
+        else:
+            self.p_y_given_x = layers[-1].forward(softmax_input)
         self.pred = T.argmax(self.p_y_given_x, axis=1)
 
         self.nll_loss = T.mean( T.nnet.categorical_crossentropy(
@@ -621,7 +635,7 @@ class Model:
             #    if len(x_for_predict) > 0:
             #        p_y_given_x = predict_model(np.vstack(x_for_predict))
             #        print x_idx, p_y_given_x
-            if epoch % 10 == 5:
+            if epoch % 10 == 0 or epoch == args.max_epochs-1:
                 evaluate_start_time = time.time()
                 print "======= Training evaluation ========"
                 evaluate(trainx, trainy, train_hier_x, products, predict_model)
@@ -666,6 +680,7 @@ def main(args):
     train_hier_x = dev_hier_x = test_hier_x = None
     if args.train:
         train_x_text, train_y, train_hier_x = read_corpus_ingredients()
+        #train_hier_x = reduce_dim(train_hier_x, args.hidden_dim)
         num_data = len(train_x_text)
         print "Num data points:", num_data
         if args.dev:
