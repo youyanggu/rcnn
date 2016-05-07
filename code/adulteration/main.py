@@ -23,15 +23,15 @@ from wikipedia import *
 np.set_printoptions(precision=3)
 wiki_path = '../../../adulteration/wikipedia/'
 
-def reduce_dim(train_hier_x, n_components, saved=False):
-    if saved:
+def reduce_dim(train_hier_x, n_components, saved=True):
+    if saved and os.path.isfile('pca.pkl'):
         with open('pca.pkl', 'r') as f:
             pca = pickle.loads(f)
         train_hier_x_new = pca.transform(train_hier_x)
     else:
         pca = PCA(n_components=n_components)
         train_hier_x_new = pca.fit_transform(train_hier_x)
-         with open('pca.pkl', 'w') as f:
+        with open('pca.pkl', 'w') as f:
             pickle.dump(pca, f)
     return train_hier_x_new
 
@@ -274,7 +274,7 @@ class Model:
         self.hier = T.fmatrix('hier')
         hier = self.hier
         if args.use_hier:
-            size = 3751 # HIER CODE
+            size = n_hidden #3751 # HIER CODE
         else:
             size = 0
         size_prod = 0
@@ -680,7 +680,7 @@ def main(args):
     train_hier_x = dev_hier_x = test_hier_x = None
     if args.train:
         train_x_text, train_y, train_hier_x = read_corpus_ingredients()
-        #train_hier_x = reduce_dim(train_hier_x, args.hidden_dim)
+        train_hier_x = reduce_dim(train_hier_x, args.hidden_dim)
         num_data = len(train_x_text)
         print "Num data points:", num_data
         if args.dev:
@@ -701,6 +701,7 @@ def main(args):
 
     if args.test:
         test_x_text, test_y, test_hier_x = read_corpus_adulterants()
+        test_hier_x = reduce_dim(test_hier_x, args.hidden_dim)
         test_x = [ embedding_layer.map_to_ids(x) for x in test_x_text ]
 
     if args.train:
