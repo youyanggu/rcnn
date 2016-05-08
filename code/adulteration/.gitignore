@@ -1,0 +1,4 @@
+*.pkl
+predictions/
+models/
+representations/

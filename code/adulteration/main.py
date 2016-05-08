@@ -183,6 +183,59 @@ def create_batches(perm, x, y, hier, batch_size):
     assert len(batches_x) == len(batches_y) == len(batches_hier)
     return batches_x, batches_y, batches_hier
 
+def gen_text_predictions(fname):
+    assert 'train' in fname or 'dev' in fname or 'test' in fname
+    results = np.load(fname)
+    text_fname = fname.replace('.npy', '.txt')
+    with open('../../../adulteration/ncim/idx_to_cat.pkl', 'rb') as f_in:
+        idx_to_cat = pickle.load(f_in)
+    if 'train' in fname:
+        ings = get_ings(5000)
+        train_indices, dev_indices = train_test_split(
+                range(5000), test_size=1/3., random_state=42)
+        ings = ings[train_indices]
+    elif 'dev' in fname:
+        ings = get_ings(5000)
+        train_indices, dev_indices = train_test_split(
+                range(5000), test_size=1/3., random_state=42)
+        ings = ings[dev_indices]
+    elif 'test' in fname:
+        ings = get_adulterants()
+        with open(wiki_path+'input_to_outputs_adulterants.pkl', 'r') as f_in:
+            input_to_outputs = pickle.load(f_in)
+        test_indices = [k for k,v in input_to_outputs.items() if v.sum()>0]
+        ings = ings[test_indices]
+    assert len(ings)==len(results)
+    hier_to_cat.test_model(
+        results, ings, idx_to_cat, top_n=5, fname=text_fname, ings_wiki_links=get_ings_wiki_links())
+
+def save_representations(get_representation, train, dev, test, products, label):
+    if not label:
+        label = str(int(time.time()))
+    trainx, trainy = train
+    devx, devy = dev
+    testx, testy = test
+    for x_data, data_name in [(trainx, 'train'), (devx, 'dev'), (testx, 'test')]:
+        ing_reps, prod_reps = [], []
+        for x_idx, x_for_predict in enumerate(x_data):
+            if len(x_for_predict) > 0:
+                if products is None:
+                    ing_rep = get_representation(np.vstack(x_for_predict))[0][0]
+                    ing_reps.append(ing_rep)
+                else:
+                    ing_rep, prod_rep = get_representation(np.vstack(x_for_predict), products)[0]
+                    ing_reps.append(ing_rep)
+                    prod_reps.append(prod_rep)
+            else:
+                ing_reps.append(np.zeros(len(ing_reps[0]))) # hopefully ing_reps[0] exists
+                if products is not None:
+                    prod_reps.append(np.zeros(len(prod_reps[0])))
+        ing_fname = 'representations/{}_{}_ing_reps.npy'.format(label, data_name)
+        np.save(ing_fname, np.array(ing_reps))
+        if products is not None:
+            prod_fname = 'representations/{}_{}_prod_reps.npy'.format(label, data_name)
+            np.save(prod_fname, np.array(prod_reps))
+
 def save_predictions(predict_model, train, dev, test, hier, products, label):
     if not label:
         label = str(int(time.time()))
@@ -212,7 +265,10 @@ def save_predictions(predict_model, train, dev, test, hier, products, label):
                 results.append(p_y_given_x)
             else:
                 results.append(np.zeros(len(results[0])))
-        np.save('predictions/{}_{}_pred.npy'.format(label, data_name), np.array(results))
+        fname = 'predictions/{}_{}_pred.npy'.format(label, data_name)
+        print "Saved predictions to:", fname
+        np.save(fname, np.array(results))
+        gen_text_predictions(fname)
 
 
 def evaluate(x_data, y_data, hier_x, products, predict_model):
@@ -285,7 +341,7 @@ class Model:
         self.hier = T.fmatrix('hier')
         hier = self.hier
         if args.use_hier:
-            size = n_hidden #3751 # HIER CODE
+            size = args.hier_dim #3751 # HIER CODE
         else:
             size = 0
         size_prod = 0
@@ -369,7 +425,7 @@ class Model:
                 prev_output_prod = apply_dropout(prev_output_prod, dropout)
                 size_prod += n_hidden
 
-        softmax_inputs.append(hier.T)
+        #softmax_inputs.append(hier.T)
 
         # final feature representation is the concatenation of all extraction layers
         if pooling:
@@ -385,12 +441,14 @@ class Model:
                 softmax_inputs_prod = T.concatenate(softmax_inputs_prod, axis=1)
             softmax_inputs_prod = apply_dropout(softmax_inputs_prod, dropout, v2=True)
 
-        #if not args.products:
+        if not args.products or args.final_softmax:
             # feed the feature repr. to the softmax output layer
-        if args.products:
-            softmax_n_in = 131 #size+size_prod
-        else:
-            softmax_n_in = size
+            if args.products:
+                softmax_n_in = 131
+                if args.use_hier:
+                    softmax_n_in += args.hier_dim
+            else:
+                softmax_n_in = size
             layers.append( Layer(
                     n_in = softmax_n_in,
                     n_out = self.nclasses,
@@ -403,13 +461,18 @@ class Model:
                 i, l.n_in, l.n_out
             ))
 
+        self.softmax_input = softmax_input
         # unnormalized score of y given x
         if args.products:
             softmax_input = T.dot(softmax_input, softmax_inputs_prod.T)
-            self.p_y_given_x = softmax(softmax_input)
-        else:
+            self.softmax_inputs_prod = softmax_inputs_prod
+        
+        softmax_input = T.concatenate([softmax_input, hier.T], axis=1)
+        if not args.products or args.final_softmax:
             self.p_y_given_x = layers[-1].forward(softmax_input)
-        self.softmax_input = softmax_input
+        else:
+            self.p_y_given_x = softmax(softmax_input)
+        
         self.pred = T.argmax(self.p_y_given_x, axis=1)
 
         self.nll_loss = T.mean( T.nnet.categorical_crossentropy(
@@ -433,7 +496,9 @@ class Model:
         say("total # parameters: {}\n".format(nparams))
 
     def save_model(self, path, args):
-         # append file suffix
+        # append file suffix
+        if not path:
+            path = str(int(time.time()))
         if not path.endswith(".pkl.gz"):
             if path.endswith(".pkl"):
                 path += ".gz"
@@ -446,6 +511,7 @@ class Model:
                 fout,
                 protocol = pickle.HIGHEST_PROTOCOL
             )
+        print "Saved model:", path
 
     def load_model(self, path):
         if not os.path.exists(path):
@@ -462,6 +528,7 @@ class Model:
         assert self.args.hidden_dim == args.hidden_dim
         for x,v in zip(self.params, param_values):
             x.set_value(v)
+        print "Loaded model:", path
 
     def eval_accuracy(self, preds, golds):
         fine = sum([ sum(p == y) for p,y in zip(preds, golds) ]) + 0.0
@@ -472,15 +539,13 @@ class Model:
     def train(self, train, dev, test, hier, products):
         args = self.args
         trainx, trainy = train
-        if hier is None or not args.use_hier:
-            hier = (None, None, None)
         train_hier_x, dev_hier_x, test_hier_x = hier
         batch_size = args.batch
 
         #if products is None:
         #    products = [[] for i in range(131)]
-        if products is not None:
-            products = np.column_stack(products)
+        #if products is not None:
+        #    products = np.column_stack(products)
         blank_product_hier = np.column_stack( [[] for i in range(131)] )
 
         if dev:
@@ -527,8 +592,8 @@ class Model:
              allow_input_downcast = True
         )
         get_representation = theano.function(
-             inputs = predict_inputs,
-             outputs = self.softmax_input,
+             inputs = [self.x, self.products] if products is not None else [self.x],
+             outputs = [self.softmax_input, self.softmax_inputs_prod] if products is not None else [self.softmax_input],
              allow_input_downcast = True
         )
         eval_acc = theano.function(
@@ -536,6 +601,8 @@ class Model:
              outputs = self.pred,
              allow_input_downcast = True
         )
+        if args.load_model:
+            return predict_model, get_representation
         unchanged = 0
         best_dev = 0.0
         dropout_prob = np.float64(args.dropout_rate).astype(theano.config.floatX)
@@ -656,9 +723,10 @@ class Model:
                     evaluate(test[0], test[1], test_hier_x, products, predict_model)
                 print "Evaluate time: {:.1f}m".format((time.time()-evaluate_start_time)/60)
                 start_time = time.time()
-
-        save_predictions(get_representation, train, dev, test, hier, args.label)
-
+                if args.save_model:
+                    self.save_model(args.model, args)
+                start_time = time.time()
+        return predict_model, get_representation
 
 def main(args):
     print args
@@ -666,6 +734,7 @@ def main(args):
     model = None
 
     assert args.embedding, "Pre-trained word embeddings required."
+    assert not (args.products and args.use_hier and not args.final_softmax), "Hier won't be used here."
 
     if '.pkl' in args.embedding:
         with open(args.embedding, 'rb') as f:
@@ -685,11 +754,12 @@ def main(args):
     if args.products:
         products_text, products_len = read_corpus_products()
         products = [ embedding_layer.map_to_ids(x) for x in products_text ]
+        products = np.column_stack(products)
 
     train_hier_x = dev_hier_x = test_hier_x = None
     if args.train:
         train_x_text, train_y, train_hier_x = read_corpus_ingredients()
-        train_hier_x = reduce_dim(train_hier_x, args.hidden_dim)
+        train_hier_x = reduce_dim(train_hier_x, args.hier_dim)
         num_data = len(train_x_text)
         print "Num data points:", num_data
         if args.dev:
@@ -703,14 +773,17 @@ def main(args):
                 dev_hier_x = train_hier_x[dev_indices]
                 train_hier_x = train_hier_x[train_indices]
         train_x = [ embedding_layer.map_to_ids(x) for x in train_x_text ]
-
+    if not args.use_hier:
+        hier = (None, None, None)
+    else:
+        hier = (train_hier_x, dev_hier_x, test_hier_x)
     if args.dev:
         #dev_x, dev_y = read_corpus(args.dev)
         dev_x = [ embedding_layer.map_to_ids(x) for x in dev_x_text ]
 
     if args.test:
         test_x_text, test_y, test_hier_x = read_corpus_adulterants()
-        test_hier_x = reduce_dim(test_hier_x, args.hidden_dim)
+        test_hier_x = reduce_dim(test_hier_x, args.hier_dim)
         test_x = [ embedding_layer.map_to_ids(x) for x in test_x_text ]
 
     if args.train:
@@ -722,13 +795,17 @@ def main(args):
             )
         model.ready()
         #print train_x[0].dtype, train_hier_x[0].dtype, dev_hier_x[0].dtype, test_hier_x[0].dtype
-        model.train(
-                (train_x, train_y),
-                (dev_x, dev_y) if args.dev else None,
-                (test_x, test_y) if args.test else None,
-                (train_hier_x, dev_hier_x, test_hier_x) if args.use_hier else None,
-                products
-            )
+        train = (train_x, train_y)
+        dev = (dev_x, dev_y) if args.dev else None
+        test = (test_x, test_y) if args.test else None
+        if args.load_model:
+            model.load_model(args.load_model)
+        predict_model, get_representation = model.train(
+            train, dev, test, hier, products)
+        print "Saving predictions"
+        save_predictions(predict_model, train, dev, test, hier, products, args.model)
+        print "Saving representations"
+        save_representations(get_representation, train, dev, test, products, args.model)
 
 
 if __name__ == "__main__":
@@ -828,6 +905,11 @@ if __name__ == "__main__":
             default = "",
             help = "save model to this file"
         )
+    argparser.add_argument("--load_model",
+            type = str,
+            default = "",
+            help = "load model from this file"
+        )
     argparser.add_argument("--pooling",
             type = int,
             default = 1,
@@ -837,14 +919,22 @@ if __name__ == "__main__":
             action='store_true',
             help = "use hierarchy"
         )
+    argparser.add_argument("--hier_dim",
+            type = int,
+            default = 100,
+            help = "hierarchy dimension"
+        )
     argparser.add_argument("--products",
             action='store_true',
             help = "use product categories"
         )
-    argparser.add_argument("--label",
-            type = str,
-            default = "",
-            help = "label for saving predictions"
+    argparser.add_argument("--final_softmax",
+            action='store_true',
+            help = "final softmax layer"
+        )
+    argparser.add_argument("--save_model",
+            action='store_true',
+            help = "whether to save model"
         )
     args = argparser.parse_args()
     main(args)
