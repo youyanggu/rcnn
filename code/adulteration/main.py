@@ -223,9 +223,9 @@ def save_representations(get_representation, train, dev, test, products, label):
                     ing_rep = get_representation(np.vstack(x_for_predict))[0][0]
                     ing_reps.append(ing_rep)
                 else:
-                    ing_rep, prod_rep = get_representation(np.vstack(x_for_predict), products)[0]
-                    ing_reps.append(ing_rep)
-                    prod_reps.append(prod_rep)
+                    ing_rep, prod_rep = get_representation(np.vstack(x_for_predict), products)
+                    ing_reps.append(ing_rep[0])
+                    prod_reps.append(prod_rep[0])
             else:
                 ing_reps.append(np.zeros(len(ing_reps[0]))) # hopefully ing_reps[0] exists
                 if products is not None:
@@ -420,7 +420,7 @@ class Model:
                     softmax_inputs_prod.append(inter_result) # summing over columns
                 else:
                     inter_result = prev_output_prod[-1]
-                    #inter_result = prev_output_prod[products_len.astype('int32'),np.arange(131),:]
+                    #inter_result = prev_output_prod[products_len.astype('int32'),np.arange(self.nclasses),:]
                     softmax_inputs_prod.append(inter_result)
                 prev_output_prod = apply_dropout(prev_output_prod, dropout)
                 size_prod += n_hidden
@@ -444,7 +444,7 @@ class Model:
         if not args.products or args.final_softmax:
             # feed the feature repr. to the softmax output layer
             if args.products:
-                softmax_n_in = 131
+                softmax_n_in = self.nclasses
                 if args.use_hier:
                     softmax_n_in += args.hier_dim
             else:
@@ -464,6 +464,10 @@ class Model:
         self.softmax_input = softmax_input
         # unnormalized score of y given x
         if args.products:
+            #b_vals = np.zeros((self.nclasses,1), dtype=theano.config.floatX)
+            b_vals = np.zeros((self.nclasses, size_prod), dtype=theano.config.floatX)
+            b = theano.shared(b_vals, name="b")
+            softmax_inputs_prod = softmax_inputs_prod + b
             softmax_input = T.dot(softmax_input, softmax_inputs_prod.T)
             self.softmax_inputs_prod = softmax_inputs_prod
         
@@ -485,6 +489,8 @@ class Model:
         self.params = [ ]
         for layer in layers:
             self.params += layer.params
+        if args.products:
+            self.params.append(b)
         for p in self.params:
             if self.l2_sqr is None:
                 self.l2_sqr = args.l2_reg * T.sum(p**2)
@@ -546,7 +552,7 @@ class Model:
         #    products = [[] for i in range(131)]
         #if products is not None:
         #    products = np.column_stack(products)
-        blank_product_hier = np.column_stack( [[] for i in range(131)] )
+        blank_product_hier = np.column_stack( [[] for i in range(self.nclasses)] )
 
         if dev:
             dev_batches_x, dev_batches_y, dev_batches_hier = create_batches(
@@ -667,7 +673,7 @@ class Model:
                 if (i == N-1) or (eval_period > 0 and (i+1) % eval_period == 0):
                     self.dropout.set_value(0.0)
 
-                    say( "\n" )
+                    say( "%s\n" % (args.model) )
                     say( "Epoch %.1f\tloss=%.4f\t|g|=%s  [%.2fm]\n" % (
                             epoch + (i+1)/(N+0.0),
                             train_loss / (i+1),
@@ -710,9 +716,9 @@ class Model:
             #    if len(x_for_predict) > 0:
             #        p_y_given_x = predict_model(np.vstack(x_for_predict))
             #        print x_idx, p_y_given_x
-            if epoch % 10 == 0 or epoch == args.max_epochs-1:
+            if (epoch+1) % 10 == 0 or epoch == args.max_epochs-1:
                 evaluate_start_time = time.time()
-                print "\nEpoch:", epoch
+                print "\nEpoch:", epoch+1
                 print "======= Training evaluation ========"
                 evaluate(trainx, trainy, train_hier_x, products, predict_model)
                 if dev:
@@ -773,10 +779,7 @@ def main(args):
                 dev_hier_x = train_hier_x[dev_indices]
                 train_hier_x = train_hier_x[train_indices]
         train_x = [ embedding_layer.map_to_ids(x) for x in train_x_text ]
-    if not args.use_hier:
-        hier = (None, None, None)
-    else:
-        hier = (train_hier_x, dev_hier_x, test_hier_x)
+    
     if args.dev:
         #dev_x, dev_y = read_corpus(args.dev)
         dev_x = [ embedding_layer.map_to_ids(x) for x in dev_x_text ]
@@ -785,6 +788,11 @@ def main(args):
         test_x_text, test_y, test_hier_x = read_corpus_adulterants()
         test_hier_x = reduce_dim(test_hier_x, args.hier_dim)
         test_x = [ embedding_layer.map_to_ids(x) for x in test_x_text ]
+
+    if not args.use_hier:
+        hier = (None, None, None)
+    else:
+        hier = (train_hier_x, dev_hier_x, test_hier_x)
 
     if args.train:
         model = Model(
