@@ -23,18 +23,18 @@ from wikipedia import *
 np.set_printoptions(precision=3)
 wiki_path = '../../../adulteration/wikipedia/'
 
-def reduce_dim(train_hier_x, n_components, saved=True):
+def reduce_dim(hier_x, n_components, saved=True):
     fname = 'pca_{}.pkl'.format(n_components)
     if saved and os.path.isfile(fname):
         with open(fname, 'r') as f:
             pca = pickle.load(f)
-        train_hier_x_new = pca.transform(train_hier_x)
+        hier_x_new = pca.transform(hier_x)
     else:
         pca = PCA(n_components=n_components)
-        train_hier_x_new = pca.fit_transform(train_hier_x)
+        hier_x_new = pca.fit_transform(hier_x)
         with open(fname, 'w') as f:
             pickle.dump(pca, f)
-    return train_hier_x_new
+    return hier_x_new
 
 def create_product_mask(products_len, n_hidden):
     mask = []
@@ -216,6 +216,9 @@ def save_representations(get_representation, train, dev, test, products, label):
     devx, devy = dev
     testx, testy = test
     for x_data, data_name in [(trainx, 'train'), (devx, 'dev'), (testx, 'test')]:
+        if x_data is None:
+            print "No data for:", data_name
+            continue
         ing_reps, prod_reps = [], []
         for x_idx, x_for_predict in enumerate(x_data):
             if len(x_for_predict) > 0:
@@ -245,6 +248,9 @@ def save_predictions(predict_model, train, dev, test, hier, products, label):
     hier_train, hier_dev, hier_test = hier
     for x_data, data_name, hier_x in [(
         trainx, 'train', hier_train), (devx, 'dev', hier_dev), (testx, 'test', hier_test)]:
+        if x_data is None:
+            print "No data for:", data_name
+            continue
         results = []
         for x_idx, x_for_predict in enumerate(x_data):
             if len(x_for_predict) > 0:
@@ -453,7 +459,7 @@ class Model:
                     n_in = softmax_n_in,
                     n_out = self.nclasses,
                     activation = softmax,
-                    has_bias = False,
+                    has_bias = False, #not args.no_bias,
             ) )
 
         for l,i in zip(layers, range(len(layers))):
@@ -461,13 +467,18 @@ class Model:
                 i, l.n_in, l.n_out
             ))
 
+        if not args.no_bias:
+            b_vals = np.zeros((size_prod,), dtype=theano.config.floatX)
+            b = theano.shared(b_vals, name="b")
+            softmax_input = softmax_input + b#.reshape((1,-1))
         self.softmax_input = softmax_input
         # unnormalized score of y given x
         if args.products:
-            #b_vals = np.zeros((self.nclasses,1), dtype=theano.config.floatX)
-            b_vals = np.zeros((self.nclasses, size_prod), dtype=theano.config.floatX)
-            b = theano.shared(b_vals, name="b")
-            softmax_inputs_prod = softmax_inputs_prod + b
+            if not args.no_bias:
+                #b_vals_prod = np.zeros((self.nclasses,), dtype=theano.config.floatX)
+                b_vals_prod = np.zeros((self.nclasses, size_prod), dtype=theano.config.floatX)
+                b_prod = theano.shared(b_vals_prod, name="b_prod")
+                softmax_inputs_prod = softmax_inputs_prod + b_prod#.reshape((-1,1)) # add reshape if broadcasting 
             softmax_input = T.dot(softmax_input, softmax_inputs_prod.T)
             self.softmax_inputs_prod = softmax_inputs_prod
         
@@ -489,8 +500,9 @@ class Model:
         self.params = [ ]
         for layer in layers:
             self.params += layer.params
-        if args.products:
+        if not args.no_bias:
             self.params.append(b)
+            self.params.append(b_prod)
         for p in self.params:
             if self.l2_sqr is None:
                 self.l2_sqr = args.l2_reg * T.sum(p**2)
@@ -513,7 +525,7 @@ class Model:
 
         with gzip.open(path, "wb") as fout:
             pickle.dump(
-                ([ x.get_value() for x in self.params ], args),
+                ([ x.get_value() for x in self.params ], args, self.nclasses),
                 fout,
                 protocol = pickle.HIGHEST_PROTOCOL
             )
@@ -527,11 +539,11 @@ class Model:
                 path += ".pkl.gz"
 
         with gzip.open(path, "rb") as fin:
-            param_values, args = pickle.load(fin)
+            param_values, args, nclasses = pickle.load(fin)
 
-        assert self.args.layer.lower() == args.layer.lower()
-        assert self.args.depth == args.depth
-        assert self.args.hidden_dim == args.hidden_dim
+        self.args = args
+        self.nclasses = nclasses
+        self.ready()
         for x,v in zip(self.params, param_values):
             x.set_value(v)
         print "Loaded model:", path
@@ -716,7 +728,7 @@ class Model:
             #    if len(x_for_predict) > 0:
             #        p_y_given_x = predict_model(np.vstack(x_for_predict))
             #        print x_idx, p_y_given_x
-            if (epoch+1) % 10 == 0 or epoch == args.max_epochs-1:
+            if epoch == 0 or (epoch+1) % 10 == 0 or epoch == args.max_epochs-1:
                 evaluate_start_time = time.time()
                 print "\nEpoch:", epoch+1
                 print "======= Training evaluation ========"
@@ -741,6 +753,7 @@ def main(args):
 
     assert args.embedding, "Pre-trained word embeddings required."
     assert not (args.products and args.use_hier and not args.final_softmax), "Hier won't be used here."
+    assert args.train or (args.load_model and args.test), "Need training data or existing model"
 
     if '.pkl' in args.embedding:
         with open(args.embedding, 'rb') as f:
@@ -794,7 +807,19 @@ def main(args):
     else:
         hier = (train_hier_x, dev_hier_x, test_hier_x)
 
-    if args.train:
+    train = (train_x, train_y) if args.train else None
+    dev = (dev_x, dev_y) if args.dev else None
+    test = (test_x, test_y) if args.test else None
+
+    if args.load_model:
+        model = Model(
+                    args = None,
+                    embedding_layer = embedding_layer,
+                    nclasses = -1
+            )
+        model.load_model(args.load_model)
+        predict_model, get_representation = model.train(train, dev, test, hier, products)
+    elif args.train:
         model = Model(
                     args = args,
                     embedding_layer = embedding_layer,
@@ -803,17 +828,12 @@ def main(args):
             )
         model.ready()
         #print train_x[0].dtype, train_hier_x[0].dtype, dev_hier_x[0].dtype, test_hier_x[0].dtype
-        train = (train_x, train_y)
-        dev = (dev_x, dev_y) if args.dev else None
-        test = (test_x, test_y) if args.test else None
-        if args.load_model:
-            model.load_model(args.load_model)
         predict_model, get_representation = model.train(
             train, dev, test, hier, products)
-        print "Saving predictions"
-        save_predictions(predict_model, train, dev, test, hier, products, args.model)
-        print "Saving representations"
-        save_representations(get_representation, train, dev, test, products, args.model)
+    print "Saving predictions"
+    save_predictions(predict_model, train, dev, test, hier, products, args.model)
+    print "Saving representations"
+    save_representations(get_representation, train, dev, test, products, args.model)
 
 
 if __name__ == "__main__":
@@ -844,8 +864,8 @@ if __name__ == "__main__":
         )
     argparser.add_argument("--learning",
             type = str,
-            default = "adagrad",
-            help = "learning method (sgd, adagrad, ...)"
+            default = "adam",
+            help = "learning method (sgd, adagrad, adam, ...)"
         )
     argparser.add_argument("--learning_rate",
             type = float,
@@ -897,7 +917,8 @@ if __name__ == "__main__":
         )
     argparser.add_argument("--layer",
             type = str,
-            default = "rcnn"
+            default = "rcnn",
+            help = "type of neural net (LSTM, RCNN, StrCNN)"
         )
     argparser.add_argument("--mode",
             type = int,
@@ -911,7 +932,11 @@ if __name__ == "__main__":
     argparser.add_argument("--model",
             type = str,
             default = "",
-            help = "save model to this file"
+            help = "label of model"
+        )
+    argparser.add_argument("--save_model",
+            action='store_true',
+            help = "whether to save model"
         )
     argparser.add_argument("--load_model",
             type = str,
@@ -940,9 +965,9 @@ if __name__ == "__main__":
             action='store_true',
             help = "final softmax layer"
         )
-    argparser.add_argument("--save_model",
+    argparser.add_argument("--no_bias",
             action='store_true',
-            help = "whether to save model"
+            help = "don't add bias to the vector representations"
         )
     args = argparser.parse_args()
     main(args)
