@@ -346,10 +346,7 @@ class Model:
         # hier is batch_size * hier_dim
         self.hier = T.fmatrix('hier')
         hier = self.hier
-        if args.use_hier:
-            size = args.hier_dim #3751 # HIER CODE
-        else:
-            size = 0
+        size = 0
         size_prod = 0
 
         # fetch word embeddings
@@ -451,15 +448,15 @@ class Model:
             # feed the feature repr. to the softmax output layer
             if args.products:
                 softmax_n_in = self.nclasses
-                if args.use_hier:
-                    softmax_n_in += args.hier_dim
             else:
                 softmax_n_in = size
+            if args.use_hier:
+                softmax_n_in += args.hier_dim
             layers.append( Layer(
                     n_in = softmax_n_in,
                     n_out = self.nclasses,
                     activation = softmax,
-                    has_bias = False, #not args.no_bias,
+                    has_bias = False,
             ) )
 
         for l,i in zip(layers, range(len(layers))):
@@ -468,9 +465,9 @@ class Model:
             ))
 
         if not args.no_bias:
-            b_vals = np.zeros((size_prod,), dtype=theano.config.floatX)
+            b_vals = np.zeros((size,), dtype=theano.config.floatX)
             b = theano.shared(b_vals, name="b")
-            softmax_input = softmax_input + b#.reshape((1,-1))
+            softmax_input = softmax_input + b
         self.softmax_input = softmax_input
         # unnormalized score of y given x
         if args.products:
@@ -502,7 +499,8 @@ class Model:
             self.params += layer.params
         if not args.no_bias:
             self.params.append(b)
-            self.params.append(b_prod)
+            if args.products:
+                self.params.append(b_prod)
         for p in self.params:
             if self.l2_sqr is None:
                 self.l2_sqr = args.l2_reg * T.sum(p**2)
