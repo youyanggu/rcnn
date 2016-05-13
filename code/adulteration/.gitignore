@@ -1,4 +1,5 @@
 *.pkl
+*.old
 predictions/
 models/
 representations/

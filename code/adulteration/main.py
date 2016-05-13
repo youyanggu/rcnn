@@ -86,6 +86,8 @@ def read_corpus_adulterants():
         corpus_y.append(normalized)
         #len_corpus_y.append(out.sum())
     assert len(corpus_x)==len(corpus_y)==len(hier_x)
+    print len(corpus_x)
+    assert False
     return np.array(corpus_x), np.array(corpus_y).astype('float32'), np.array(hier_x).astype('float32')
 
 def read_corpus_ingredients(num_ingredients=5000):
@@ -183,6 +185,21 @@ def create_batches(perm, x, y, hier, batch_size):
     assert len(batches_x) == len(batches_y) == len(batches_hier)
     return batches_x, batches_y, batches_hier
 
+def get_ing_split(seed=42):
+    num_ingredients = 5000
+    ings = get_ings(num_ingredients)
+    train_indices, dev_indices = train_test_split(
+        range(num_ingredients), test_size=1/3., random_state=seed)
+    ings_train = ings[train_indices]
+    ings_dev = ings[dev_indices]
+    
+    adulterants = get_adulterants()
+    with open(wiki_path+'input_to_outputs_adulterants.pkl', 'r') as f_in:
+        input_to_outputs = pickle.load(f_in)
+    test_indices = [k for k,v in input_to_outputs.items() if v.sum()>0]
+    adulterants = adulterants[test_indices]
+    return ings_train, ings_dev, adulterants
+
 def gen_text_predictions(fname):
     assert 'train' in fname or 'dev' in fname or 'test' in fname
     results = np.load(fname)
@@ -219,25 +236,30 @@ def save_representations(get_representation, train, dev, test, products, label):
         if x_data is None:
             print "No data for:", data_name
             continue
-        ing_reps, prod_reps = [], []
+        ing_reps = []
+        prod_reps = None
+        counter = 0
         for x_idx, x_for_predict in enumerate(x_data):
             if len(x_for_predict) > 0:
+                counter += 1
                 if products is None:
                     ing_rep = get_representation(np.vstack(x_for_predict))[0][0]
                     ing_reps.append(ing_rep)
                 else:
                     ing_rep, prod_rep = get_representation(np.vstack(x_for_predict), products)
                     ing_reps.append(ing_rep[0])
-                    prod_reps.append(prod_rep[0])
+                    if prod_reps is None:
+                        prod_reps = prod_rep
+                    else:
+                        prod_reps += prod_rep
             else:
                 ing_reps.append(np.zeros(len(ing_reps[0]))) # hopefully ing_reps[0] exists
-                if products is not None:
-                    prod_reps.append(np.zeros(len(prod_reps[0])))
+        prod_reps /= counter
         ing_fname = 'representations/{}_{}_ing_reps.npy'.format(label, data_name)
         np.save(ing_fname, np.array(ing_reps))
         if products is not None:
             prod_fname = 'representations/{}_{}_prod_reps.npy'.format(label, data_name)
-            np.save(prod_fname, np.array(prod_reps))
+            np.save(prod_fname, prod_reps)
 
 def save_predictions(predict_model, train, dev, test, hier, products, label):
     if not label:
@@ -638,6 +660,9 @@ class Model:
             batches_x, batches_y, batches_hier = create_batches(
                 perm, trainx, trainy, train_hier_x, batch_size)
             N = len(batches_x)
+
+            blah = None#Delete me
+
             for i in xrange(N):
 
                 if i % 100 == 0:
@@ -666,11 +691,7 @@ class Model:
                 
                 #if products is not None:
                 #    print x.shape, hier_x.shape, np.array(products[0:1]).T.shape, hier_x[:,0:1].shape
-                
                 #print i, N
-                #if products is not None:
-                #    prod_rep = get_representation(products, blank_product_hier)
-                #    print prod_rep
 
                 # debug
                 if math.isnan(va):
