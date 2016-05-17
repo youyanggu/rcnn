@@ -86,8 +86,6 @@ def read_corpus_adulterants():
         corpus_y.append(normalized)
         #len_corpus_y.append(out.sum())
     assert len(corpus_x)==len(corpus_y)==len(hier_x)
-    print len(corpus_x)
-    assert False
     return np.array(corpus_x), np.array(corpus_y).astype('float32'), np.array(hier_x).astype('float32')
 
 def read_corpus_ingredients(num_ingredients=5000):
@@ -254,10 +252,10 @@ def save_representations(get_representation, train, dev, test, products, label):
                         prod_reps += prod_rep
             else:
                 ing_reps.append(np.zeros(len(ing_reps[0]))) # hopefully ing_reps[0] exists
-        prod_reps /= counter
         ing_fname = 'representations/{}_{}_ing_reps.npy'.format(label, data_name)
         np.save(ing_fname, np.array(ing_reps))
         if products is not None:
+            prod_reps /= counter
             prod_fname = 'representations/{}_{}_prod_reps.npy'.format(label, data_name)
             np.save(prod_fname, prod_reps)
 
@@ -500,6 +498,8 @@ class Model:
                 softmax_inputs_prod = softmax_inputs_prod + b_prod#.reshape((-1,1)) # add reshape if broadcasting 
             softmax_input = T.dot(softmax_input, softmax_inputs_prod.T)
             self.softmax_inputs_prod = softmax_inputs_prod
+        #else:
+            #self.softmax_inputs_prod = layers[-1].W
         
         softmax_input = T.concatenate([softmax_input, hier.T], axis=1)
         if not args.products or args.final_softmax:
