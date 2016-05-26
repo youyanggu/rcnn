@@ -117,6 +117,7 @@ class Layer(object):
             if activation == softmax:
                 #W_vals *= 0.000
                 W_vals = np.zeros((n_in,n_out), dtype=theano.config.floatX)
+                b_vals = np.zeros(n_out, dtype=theano.config.floatX)
             if activation == ReLU:
                 b_vals = np.ones(n_out, dtype=theano.config.floatX) * 0.01
             else:

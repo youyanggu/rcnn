@@ -94,9 +94,22 @@ def run_online(reps, reps_prod, sequence, batch, l2_reg, step_size):
         #w = w - step_size * gradient
         w = w.clip(min=1e-8, max=2)
         #w = gradient_update()
+    """
     plt.xlabel('t')
-    plt.ylabel('loss')
-    plt.plot(losses)
+    plt.ylabel('mean loss up to t')
+    if batch == 1:
+        label = 'online'
+        linestyle = '-'
+    elif batch == 10:
+        label = 'mini-batch'
+        linestyle = '--'
+    else:
+        label = 'batch all'
+        linestyle = ':'
+    plt.plot(np.cumsum(losses) / np.arange(len(losses)), label=label, linestyle=linestyle)
+    plt.legend(loc='upper right')
+    plt.grid()
+    """
     return np.mean(losses), w
 
 def unseen_wiki_articles(seed=42):
@@ -122,6 +135,7 @@ def plot_stuff():
     plt.xlabel('sequence length')
     plt.ylabel('online loss / baseline loss')
     #plt.title('Correlation between sequence length and improvement in loss')
+    plt.xscale('log')
     plt.plot(sequence_lens, ratios, '.')
     plt.grid()
     plt.show()
@@ -240,6 +254,7 @@ def run(model_id, dataset):
         all_batchall_losses.append(batchall_loss)
         all_batchk_losses.append(batchk_loss)
         all_online_losses.append(online_loss)
+        break
     print "-------------------------------------------------------"
     print "Mean True Loss      :", np.mean(all_min_losses)
     print "Mean Uniform Loss   :", np.mean(all_uniform_losses)

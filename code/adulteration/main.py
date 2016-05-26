@@ -12,16 +12,21 @@ import theano.tensor as T
 sys.path.append('../')
 sys.path.append('../../../adulteration/wikipedia')
 sys.path.append('../../../adulteration/model')
-from nn import get_activation_by_name, create_optimization_updates, softmax
+from nn import get_activation_by_name, create_optimization_updates, softmax, sigmoid
 from nn import Layer, EmbeddingLayer, LSTM, RCNN, StrCNN, Dropout, apply_dropout
 from utils import say, load_embedding_iterator
 
 import hier_to_cat
 import scoring
+from split_data import split_data_by_wiki
 from wikipedia import *
 
 np.set_printoptions(precision=3)
 wiki_path = '../../../adulteration/wikipedia/'
+
+def convert_to_zero_one(v):
+    """Convert probability distribution to zero (not occured) or one (occured)."""
+    return (v>0).astype('int32')
 
 def reduce_dim(hier_x, n_components, saved=True):
     fname = 'pca_{}.pkl'.format(n_components)
@@ -183,11 +188,17 @@ def create_batches(perm, x, y, hier, batch_size):
     assert len(batches_x) == len(batches_y) == len(batches_hier)
     return batches_x, batches_y, batches_hier
 
-def get_ing_split(seed=42):
+def get_ing_split(seed):
+    """Split ing into train, dev, adulterants. 
+
+    To be replaced by split_data.split_data_by_wiki.
+    """
     num_ingredients = 5000
     ings = get_ings(num_ingredients)
-    train_indices, dev_indices = train_test_split(
-        range(num_ingredients), test_size=1/3., random_state=seed)
+    #train_indices, dev_indices = train_test_split(
+    #    range(num_ingredients), test_size=1/3., random_state=seed)
+    train_indices, dev_indices, test_indices = split_data_by_wiki(
+        ings, seed)
     ings_train = ings[train_indices]
     ings_dev = ings[dev_indices]
     
@@ -198,21 +209,22 @@ def get_ing_split(seed=42):
     adulterants = adulterants[test_indices]
     return ings_train, ings_dev, adulterants
 
-def gen_text_predictions(fname):
+def gen_text_predictions(fname, seed):
+    """Generate text predictions given the prediction vector file."""
     assert 'train' in fname or 'dev' in fname or 'test' in fname
     results = np.load(fname)
     text_fname = fname.replace('.npy', '.txt')
     with open('../../../adulteration/ncim/idx_to_cat.pkl', 'rb') as f_in:
         idx_to_cat = pickle.load(f_in)
+    ings = get_ings(5000)
+    train_indices, dev_indices, test_indices = split_data_by_wiki(ings, seed)
     if 'train' in fname:
-        ings = get_ings(5000)
-        train_indices, dev_indices = train_test_split(
-                range(5000), test_size=1/3., random_state=42)
+        #train_indices, dev_indices = train_test_split(
+        #        range(5000), test_size=1/3., random_state=seed)
         ings = ings[train_indices]
     elif 'dev' in fname:
-        ings = get_ings(5000)
-        train_indices, dev_indices = train_test_split(
-                range(5000), test_size=1/3., random_state=42)
+        #train_indices, dev_indices = train_test_split(
+        #        range(5000), test_size=1/3., random_state=seed)
         ings = ings[dev_indices]
     elif 'test' in fname:
         ings = get_adulterants()
@@ -259,7 +271,7 @@ def save_representations(get_representation, train, dev, test, products, label):
             prod_fname = 'representations/{}_{}_prod_reps.npy'.format(label, data_name)
             np.save(prod_fname, prod_reps)
 
-def save_predictions(predict_model, train, dev, test, hier, products, label):
+def save_predictions(predict_model, train, dev, test, hier, products, label, seed):
     if not label:
         label = str(int(time.time()))
     trainx, trainy = train
@@ -294,7 +306,7 @@ def save_predictions(predict_model, train, dev, test, hier, products, label):
         fname = 'predictions/{}_{}_pred.npy'.format(label, data_name)
         print "Saved predictions to:", fname
         np.save(fname, np.array(results))
-        gen_text_predictions(fname)
+        gen_text_predictions(fname, seed)
 
 
 def evaluate(x_data, y_data, hier_x, products, predict_model):
@@ -475,7 +487,7 @@ class Model:
             layers.append( Layer(
                     n_in = softmax_n_in,
                     n_out = self.nclasses,
-                    activation = softmax,
+                    activation = sigmoid if args.binary else softmax,
                     has_bias = False,
             ) )
 
@@ -505,11 +517,19 @@ class Model:
         if not args.products or args.final_softmax:
             self.p_y_given_x = layers[-1].forward(softmax_input)
         else:
-            self.p_y_given_x = softmax(softmax_input)
+            if args.binary:
+                self.p_y_given_x = sigmoid(softmax_input)
+            else:
+                self.p_y_given_x = softmax(softmax_input)
         
         self.pred = T.argmax(self.p_y_given_x, axis=1)
 
-        self.nll_loss = T.mean( T.nnet.categorical_crossentropy(
+        
+        if args.binary:
+            loss_func = T.nnet.binary_crossentropy
+        else:
+            loss_func = T.nnet.categorical_crossentropy
+        self.nll_loss = T.mean( loss_func(
                                     self.p_y_given_x,
                                     y
                             ))
@@ -769,6 +789,7 @@ def main(args):
     print args
 
     model = None
+    ings = get_ings(5000)
 
     assert args.embedding, "Pre-trained word embeddings required."
     assert not (args.products and args.use_hier and not args.final_softmax), "Hier won't be used here."
@@ -797,12 +818,16 @@ def main(args):
     train_hier_x = dev_hier_x = test_hier_x = None
     if args.train:
         train_x_text, train_y, train_hier_x = read_corpus_ingredients()
+        if args.binary:
+            train_y = convert_to_zero_one(train_y)
         train_hier_x = reduce_dim(train_hier_x, args.hier_dim)
         num_data = len(train_x_text)
         print "Num data points:", num_data
         if args.dev:
-            train_indices, dev_indices = train_test_split(
-                range(num_data), test_size=1/3., random_state=42)
+            #train_indices, dev_indices = train_test_split(
+            #    range(num_data), test_size=1/3., random_state=seed)
+            train_indices, dev_indices, test_indices = split_data_by_wiki(
+                ings, args.seed)
             dev_x_text = train_x_text[dev_indices]
             train_x_text = train_x_text[train_indices]
             dev_y = train_y[dev_indices]
@@ -818,6 +843,8 @@ def main(args):
 
     if args.test:
         test_x_text, test_y, test_hier_x = read_corpus_adulterants()
+        if args.binary:
+            test_y = convert_to_zero_one(test_y)
         test_hier_x = reduce_dim(test_hier_x, args.hier_dim)
         test_x = [ embedding_layer.map_to_ids(x) for x in test_x_text ]
 
@@ -850,7 +877,7 @@ def main(args):
         predict_model, get_representation = model.train(
             train, dev, test, hier, products)
     print "Saving predictions"
-    save_predictions(predict_model, train, dev, test, hier, products, args.model)
+    save_predictions(predict_model, train, dev, test, hier, products, args.model, args.seed)
     print "Saving representations"
     save_representations(get_representation, train, dev, test, products, args.model)
 
@@ -945,7 +972,7 @@ if __name__ == "__main__":
         )
     argparser.add_argument("--seed",
             type = int,
-            default = -1,
+            default = 42,
             help = "random seed of the model"
         )
     argparser.add_argument("--model",
@@ -987,6 +1014,10 @@ if __name__ == "__main__":
     argparser.add_argument("--no_bias",
             action='store_true',
             help = "don't add bias to the vector representations"
+        )
+    argparser.add_argument("--binary",
+            action='store_true',
+            help = "binary prediction for each product category rather than distribution"
         )
     args = argparser.parse_args()
     main(args)
