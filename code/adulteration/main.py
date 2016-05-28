@@ -69,8 +69,9 @@ def read_corpus_adulterants():
     with open(wiki_path+'input_to_outputs_adulterants.pkl', 'r') as f_in:
         input_to_outputs = pickle.load(f_in)
     corpus_x, corpus_y, hier_x = [], [], []
-    input_keys = sorted(input_to_outputs.keys())
-    adulterants = get_adulterants()
+    adulterants = get_adulterants(get_all=True)
+    assert len(adulterants) == len(input_to_outputs)
+    input_keys = range(len(adulterants))
     input_tokens = input_to_tokens(input_keys, adulterants)
     ing_idx_to_hier_map = hier_to_cat.gen_ing_idx_to_hier_map(adulterants, adulterants=True)
     assert len(input_keys) == len(input_tokens)
@@ -111,8 +112,7 @@ def read_corpus_ingredients(num_ingredients=5000):
         hier = ing_idx_to_hier_map.get(i, np.zeros(3751))
         assert len(hier) == 3751
         out = input_to_outputs[inp]
-        if out.sum() <= 0:
-            continue
+        assert out.sum() > 0, "Each ing must have a product category"
         #y_data.extend(out)
         #y_indices.extend(range(len(out)))
         #y_indptr.append(len(out))
@@ -209,14 +209,18 @@ def get_ing_split(seed):
     adulterants = adulterants[test_indices]
     return ings_train, ings_dev, adulterants
 
-def gen_text_predictions(fname, seed):
+def gen_text_predictions(args, fname):
     """Generate text predictions given the prediction vector file."""
     assert 'train' in fname or 'dev' in fname or 'test' in fname
+    seed = args.seed
     results = np.load(fname)
     text_fname = fname.replace('.npy', '.txt')
     with open('../../../adulteration/ncim/idx_to_cat.pkl', 'rb') as f_in:
         idx_to_cat = pickle.load(f_in)
     ings = get_ings(5000)
+    if args.add_adulterants:
+        adulterants = get_adulterants()
+        ings = np.hstack([ings, adulterants])
     train_indices, dev_indices, test_indices = split_data_by_wiki(ings, seed)
     if 'train' in fname:
         #train_indices, dev_indices = train_test_split(
@@ -227,16 +231,20 @@ def gen_text_predictions(fname, seed):
         #        range(5000), test_size=1/3., random_state=seed)
         ings = ings[dev_indices]
     elif 'test' in fname:
-        ings = get_adulterants()
-        with open(wiki_path+'input_to_outputs_adulterants.pkl', 'r') as f_in:
-            input_to_outputs = pickle.load(f_in)
-        test_indices = [k for k,v in input_to_outputs.items() if v.sum()>0]
-        ings = ings[test_indices]
+        if args.test_adulterants_only:
+            ings = get_adulterants()
+            #with open(wiki_path+'input_to_outputs_adulterants.pkl', 'r') as f_in:
+            #    input_to_outputs = pickle.load(f_in)
+            #test_indices = [k for k,v in input_to_outputs.items() if v.sum()>0]
+            #ings = adulterants[test_indices]
+        else:
+            ings = ings[test_indices]
     assert len(ings)==len(results)
     hier_to_cat.test_model(
         results, ings, idx_to_cat, top_n=5, fname=text_fname, ings_wiki_links=get_ings_wiki_links())
 
-def save_representations(get_representation, train, dev, test, products, label):
+def save_representations(args, get_representation, train, dev, test, products):
+    label = args.model
     if not label:
         label = str(int(time.time()))
     trainx, trainy = train
@@ -271,7 +279,9 @@ def save_representations(get_representation, train, dev, test, products, label):
             prod_fname = 'representations/{}_{}_prod_reps.npy'.format(label, data_name)
             np.save(prod_fname, prod_reps)
 
-def save_predictions(predict_model, train, dev, test, hier, products, label, seed):
+def save_predictions(args, predict_model, train, dev, test, hier, products):
+    label = args.model
+    seed = args.seed
     if not label:
         label = str(int(time.time()))
     trainx, trainy = train
@@ -306,7 +316,7 @@ def save_predictions(predict_model, train, dev, test, hier, products, label, see
         fname = 'predictions/{}_{}_pred.npy'.format(label, data_name)
         print "Saved predictions to:", fname
         np.save(fname, np.array(results))
-        gen_text_predictions(fname, seed)
+        gen_text_predictions(args, fname)
 
 
 def evaluate(x_data, y_data, hier_x, products, predict_model):
@@ -790,11 +800,13 @@ def main(args):
 
     model = None
     ings = get_ings(5000)
+    adulterants = get_adulterants()
 
     assert args.embedding, "Pre-trained word embeddings required."
     assert not (args.products and args.use_hier and not args.final_softmax), "Hier won't be used here."
     assert args.train or (args.load_model and args.test), "Need training data or existing model"
 
+    print "Loading embeddings"
     if '.pkl' in args.embedding:
         with open(args.embedding, 'rb') as f:
             embedding = pickle.load(f)
@@ -809,6 +821,7 @@ def main(args):
                 embs = embedding       
             )
 
+    print "Reading corpus"
     products, products_len = None, None
     if args.products:
         products_text, products_len = read_corpus_products()
@@ -817,35 +830,50 @@ def main(args):
 
     train_hier_x = dev_hier_x = test_hier_x = None
     if args.train:
-        train_x_text, train_y, train_hier_x = read_corpus_ingredients()
+        data_x_text, data_y, data_hier_x = read_corpus_ingredients()
+        print "# Ings:", len(data_x_text)
+        if args.add_adulterants:
+            test_x_text, test_y, test_hier_x = read_corpus_adulterants()
+            print "# Adulterants:", len(test_x_text)
+            assert len(test_x_text) == len(adulterants)
+            data_x_text = np.array(list(data_x_text) + list(test_x_text))
+            data_y = np.array(list(data_y) + list(test_y)).astype('float32')
+            data_hier_x = np.array(list(data_hier_x) + list(test_hier_x)).astype('float32')
+            ings = np.hstack([ings, adulterants])
         if args.binary:
-            train_y = convert_to_zero_one(train_y)
-        train_hier_x = reduce_dim(train_hier_x, args.hier_dim)
-        num_data = len(train_x_text)
-        print "Num data points:", num_data
-        if args.dev:
+            data_y = convert_to_zero_one(data_y)
+        data_hier_x = reduce_dim(data_hier_x, args.hier_dim)
+        #print "Num data points:", len(data_x_text)
+        if args.dev or args.test:
             #train_indices, dev_indices = train_test_split(
-            #    range(num_data), test_size=1/3., random_state=seed)
+            #    range(len(data_x_text)), test_size=1/3., random_state=seed)
             train_indices, dev_indices, test_indices = split_data_by_wiki(
                 ings, args.seed)
-            dev_x_text = train_x_text[dev_indices]
-            train_x_text = train_x_text[train_indices]
-            dev_y = train_y[dev_indices]
-            train_y = train_y[train_indices]
-            if len(train_hier_x) > 0:
-                dev_hier_x = train_hier_x[dev_indices]
-                train_hier_x = train_hier_x[train_indices]
+            if not args.test_adulterants_only:
+                test_x_text = data_x_text[test_indices]
+                test_y = data_y[test_indices]
+            dev_x_text = data_x_text[dev_indices]
+            train_x_text = data_x_text[train_indices]
+            dev_y = data_y[dev_indices]
+            train_y = data_y[train_indices]
+            if len(data_hier_x) > 0:
+                if not args.test_adulterants_only:
+                    test_hier_x = data_hier_x[test_indices]
+                dev_hier_x = data_hier_x[dev_indices]
+                train_hier_x = data_hier_x[train_indices]
         train_x = [ embedding_layer.map_to_ids(x) for x in train_x_text ]
     
     if args.dev:
         #dev_x, dev_y = read_corpus(args.dev)
         dev_x = [ embedding_layer.map_to_ids(x) for x in dev_x_text ]
 
-    if args.test:
+    if args.test_adulterants_only:
         test_x_text, test_y, test_hier_x = read_corpus_adulterants()
         if args.binary:
             test_y = convert_to_zero_one(test_y)
         test_hier_x = reduce_dim(test_hier_x, args.hier_dim)
+    
+    if args.test:
         test_x = [ embedding_layer.map_to_ids(x) for x in test_x_text ]
 
     if not args.use_hier:
@@ -877,9 +905,9 @@ def main(args):
         predict_model, get_representation = model.train(
             train, dev, test, hier, products)
     print "Saving predictions"
-    save_predictions(predict_model, train, dev, test, hier, products, args.model, args.seed)
+    save_predictions(args, predict_model, train, dev, test, hier, products)
     print "Saving representations"
-    save_representations(get_representation, train, dev, test, products, args.model)
+    save_representations(args, get_representation, train, dev, test, products)
 
 
 if __name__ == "__main__":
@@ -1014,6 +1042,14 @@ if __name__ == "__main__":
     argparser.add_argument("--no_bias",
             action='store_true',
             help = "don't add bias to the vector representations"
+        )
+    argparser.add_argument("--add_adulterants",
+            action='store_true',
+            help = "add adulterants to training"
+        )
+    argparser.add_argument("--test_adulterants_only",
+            action='store_true',
+            help = "test using adulterants only"
         )
     argparser.add_argument("--binary",
             action='store_true',
