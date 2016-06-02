@@ -2,6 +2,8 @@ import argparse
 import itertools
 import numpy as np
 import cPickle as pickle
+import matplotlib
+matplotlib.use('agg')
 import matplotlib.pyplot as plt
 import os
 from scipy import optimize
@@ -53,7 +55,7 @@ def gen_sequence(counts, add_negatives=False, max_positives=None, max_total=None
         max_total - max total observations.
         max_negatives_ratio - # of negatives observations <= # positives * max_negatives_ratio
     Output:
-        sequence of product category indices
+        sequence of product category indices. if use_pair, returns list. otherwise, returns numpy array.
     """
     assert not (use_pair and not add_negatives)
     num_categories = len(counts)
@@ -86,7 +88,7 @@ def get_baseline_loss(pred, sequence):
     """Compute the baseline loss (with w=eye(d)) given a constant prediction distribution 
     and a sequence of product categories."""
     assert len(sequence)>0
-    if type(sequence[0]) == tuple:
+    if type(sequence[0]) == np.ndarray:
         sequence = list(sum(sequence, ())) # flatten sequence
     probs = []
     for t, y in enumerate(sequence):
@@ -121,8 +123,8 @@ def run_naive_online(reps, reps_prod, binary, sequence, multiplier):
             assert abs(pred.sum()-1) < 1e-3
     return np.mean(losses), pred
 
-def run_online(ing_idx, reps, reps_prod, binary, use_pair, sequence, batch,
-    l2_reg, maxiter, step_size, method, lower_bound, upper_bound, ing_cat_pair_map=None):
+def run_online(ing_idx, reps, reps_prod, binary, skip_online_updates, use_pair, sequence, batch,
+    l2_reg, learn_lambda_min_pos, maxiter, step_size, method, lower_bound, upper_bound, ing_cat_pair_map=None):
     def loss_func1(w):
         pred = p_y_given_x(reps, reps_prod.T, binary, w)[0]
         #prob = pred[batch_y]
@@ -139,6 +141,7 @@ def run_online(ing_idx, reps, reps_prod, binary, use_pair, sequence, batch,
         loss = -(np.sum(np.log(prob)) - l2_reg*np.sum((w-1)**2)/2)#-np.sum(np.log(w)-w+1))
         return loss
 
+    sequence = np.array(sequence)
     d = reps.shape[1]
     w = np.ones(d)
     eps = np.sqrt(np.finfo(float).eps)
@@ -147,7 +150,57 @@ def run_online(ing_idx, reps, reps_prod, binary, use_pair, sequence, batch,
     remaining_indices = range(num_categories)
     orig_pred = p_y_given_x(reps, reps_prod.T, binary, w)[0]
     pred = orig_pred
+    loss_func = loss_func2 if use_pair else loss_func1
+    ops = {}
+    if maxiter:
+        ops['maxiter'] = maxiter
+    if step_size:
+        ops['eps'] = step_size
+    if method is None:
+        method = 'BFGS' if (lower_bound is None and upper_bound is None) else 'L-BFGS-B'
+        
+    # Find optimum lambda
+    lambdas = np.array([0.01, 0.03, 0.05, 0.07, 0.1, 0.14, 0.18, 0.22])
+    lambda_scores = []
+    print len(sequence)
+    num_pos = len(sequence) if use_pair else (sequence>=0).sum()
+    if num_pos >= learn_lambda_min_pos and not use_pair:
+        # Choose best lambda via cross-validation.
+        for l2_reg in lambdas:
+            map_left_outs = []
+            for left_out_idx in range(len(sequence)):
+                if use_pair:
+                    left_out_pos_idx = sequence[left_out_idx][0]
+                else:
+                    left_out_pos_idx = sequence[left_out_idx]
+                if not use_pair and left_out_pos_idx<0:
+                    continue
+                w = np.ones(d)
+                new_sequence = np.delete(sequence, left_out_idx, axis=0)
+                batch_y = new_sequence
+                res = optimize.minimize(loss_func, w, 
+                    method=method, 
+                    options=ops,
+                    bounds=[(lower_bound, upper_bound)]*len(w)
+                )
+                w = res.x
+                pred_lambda = p_y_given_x(reps, reps_prod.T, binary, w)[0]
+                map_left_out = 1./(np.where(np.argsort(-pred_lambda)==left_out_pos_idx)[0][0]+1)
+                map_left_outs.append(map_left_out)
+            print map_left_outs
+            lambda_scores.append(np.mean(map_left_outs))
+            #print l2_reg, map_left_outs, pred_lambda, w
+        
+        lambda_scores = np.array(lambda_scores)
+        best_lambda = lambdas[np.where(lambda_scores==max(lambda_scores))[0][0]]
+        #lambda_weights = np.exp2(-(len(lambda_scores)-1-np.argsort(np.argsort(lambda_scores))))
+        lambda_weights = np.argsort(np.argsort(lambda_scores))
+        #avg_lambda = (lambda_weights*lambdas).sum() / lambda_weights.sum()
+        avg_lambda = lambdas[np.argsort(-lambda_scores)[:3]].mean()
+        print best_lambda, avg_lambda, lambda_scores
+        l2_reg = avg_lambda #best_lambda#orig_lambda
 
+    map_1_orig = map_1_new = 0
     losses = []
     assert len(sequence) > 0
     for t, y in enumerate(sequence):
@@ -170,27 +223,7 @@ def run_online(ing_idx, reps, reps_prod, binary, use_pair, sequence, batch,
                     loss = -np.log(prob)
                     losses.append(loss)
                 seen_indices.add(y)
-        batch_y = sequence[t:max(0,t-batch):-1]
-        loss_func = loss_func2 if use_pair else loss_func1
-        ops = {}
-        if maxiter:
-            ops['maxiter'] = maxiter
-        if step_size:
-            ops['eps'] = step_size
-        res = optimize.minimize(loss_func, w, 
-            method=method, 
-            options=ops,
-            bounds=[(lower_bound, upper_bound)]*len(w)
-        )
-        w = res.x
-        #print "# iterations:", res.nit
-        #print "Pre:", w, loss_func(w, True)
-        #gradient = optimize.approx_fprime(w, loss_func, eps)
-        #print "Post:", gradient, w - step_size * gradient
-        #w = w - step_size / max(1,np.sqrt((t+1)/100)) * gradient
-        #w = w - step_size * gradient
-        #w = w.clip(min=1e-8, max=10)
-        #w = gradient_update()
+        
         if use_pair:
             if pos_idx in remaining_indices:
                 remaining_indices.remove(pos_idx)
@@ -203,6 +236,18 @@ def run_online(ing_idx, reps, reps_prod, binary, use_pair, sequence, batch,
             elif -(y+1) in remaining_indices:
                 remaining_indices.remove(-(y+1))
         assert len(remaining_indices) > 0
+
+        if skip_online_updates and t != len(sequence)-1:
+            continue
+
+        batch_y = sequence[t:max(0,t-batch):-1]
+        res = optimize.minimize(loss_func, w, 
+            method=method, 
+            options=ops,
+            bounds=[(lower_bound, upper_bound)]*len(w)
+        )
+        w = res.x
+
         pred = p_y_given_x(reps, reps_prod.T, binary, w)[0]
         if t in [1, len(sequence)-1]:
             print "Num observations:", t+1
@@ -254,7 +299,7 @@ def run_online(ing_idx, reps, reps_prod, binary, use_pair, sequence, batch,
     plt.legend(loc='upper right')
     plt.grid()
     """
-    return np.mean(losses), w, map_1_orig, map_1_new, \
+    return np.mean(losses), w, l2_reg, map_1_orig, map_1_new, \
         map_final_orig, map_final_new, map_prior, map_posterior
 
 def unseen_wiki_articles(seed=42):
@@ -301,8 +346,10 @@ def main(args):
     dataset = args.dataset
     seed = args.seed
     use_askubuntu = args.use_askubuntu
+    skip_online_updates = args.skip_online_updates
     iterations_per_ing = args.iterations_per_ing
     l2_reg = args.l2_reg
+    learn_lambda_min_pos = args.learn_lambda_min_pos
     use_pair = args.use_pair
     lower_bound = args.lower_bound
     upper_bound = args.upper_bound
@@ -310,6 +357,7 @@ def main(args):
     max_total = args.max_total
     max_negatives_ratio = args.max_negatives_ratio
     max_iterations = args.max_iterations
+    save_id = args.save_id
 
     maxiter = None#100
     step_size = None#1e-5
@@ -390,8 +438,10 @@ def main(args):
     
     if not use_args:
         if askubuntu:
-            iterations_per_ing = 1
+            skip_online_updates = True
+            iterations_per_ing = 5
             l2_reg = 0.015#0.015
+            learn_lambda_min_pos = 5
             maxiter = None
             step_size = None
             add_negatives = True
@@ -404,10 +454,13 @@ def main(args):
             max_total = None
             max_negatives_ratio = 1
             max_iterations = 200
+            save_id = 2
         else:
             #print_predictions = True
+            skip_online_updates = True
             iterations_per_ing = 5
-            l2_reg = 0.1#0.1 #0.5
+            l2_reg = 0.1 #0.5
+            learn_lambda_min_pos = 9999
             maxiter = None#100
             step_size = None#1e-5
             add_negatives = True
@@ -417,9 +470,10 @@ def main(args):
             lower_bound = 0
             upper_bound = 2
             max_positives = 20
-            max_total = 20
-            max_negatives_ratio = 2.5
+            max_total = 100
+            max_negatives_ratio = 5
             max_iterations = 200
+            save_id = 1
     all_min_losses = [] # loss using true distrubution
     all_uniform_losses = [] # loss using uniform distribution
     all_baseline_losses = [] # loss using static batch prediction
@@ -437,6 +491,7 @@ def main(args):
     num_pos = []
     observed_ings = []
     final_weights = []
+    all_l2_reg = []
     start_time = time.time()
     cur_iterations = 0
     indices2 = list(enumerate(indices))[::-1]
@@ -474,7 +529,7 @@ def main(args):
             sequence = gen_sequence(counts, add_negatives, max_positives, max_total, max_negatives_ratio, use_pair)
             if use_pair and max_total:
                 # filter by pair scores
-                seq_scores = [-pred[pos_idx]+pred[neg_idx] for pos_idx, neg_idx in sequence]
+                seq_scores = [pred[pos_idx]-pred[neg_idx] for pos_idx, neg_idx in sequence]
                 sequence = [sequence[i] for i in sorted(np.argsort(seq_scores)[:max_total])]
             if iteration == 0:
                 if use_pair:
@@ -492,15 +547,16 @@ def main(args):
             #naive_online_loss, naive_pred = run_naive_online(rep, reps_prod, binary, sequence, naive_mutiplier)
             
         
-            batchall_loss, w_batchall, map_1_orig, map_1_new, map_final_orig, \
+            batchall_loss, w_batchall, new_l2_reg, map_1_orig, map_1_new, map_final_orig, \
                 map_final_new, map_prior, map_posterior = run_online(
-                ind, rep, reps_prod, binary, use_pair, sequence, len(sequence), l2_reg, \
-                maxiter, step_size, method, lower_bound, upper_bound, ing_cat_pair_map)
+                ind, rep, reps_prod, binary, skip_online_updates, use_pair, sequence, len(sequence), l2_reg, \
+                learn_lambda_min_pos, maxiter, step_size, method, lower_bound, upper_bound, ing_cat_pair_map)
             map_improvement_1 = map_1_new - map_1_orig
             map_improvement_final = map_final_new - map_final_orig
             map_improvement_post = map_posterior - map_prior
             #batchk_loss, w_batchk = run_online(rep, reps_prod, binary, use_pair, sequence, batch_k, l2_reg, step_size, method, lower_bound, upper_bound)
             #online_loss, w_online = run_online(rep, reps_prod, binary, use_pair, sequence, 1, l2_reg, step_size, method, lower_bound, upper_bound)
+            all_l2_reg.append(new_l2_reg)
             map_improvements_1.append(map_improvement_1)
             map_improvements_final.append(map_improvement_final)
             map_improvements_post.append(map_improvement_post)
@@ -550,6 +606,7 @@ def main(args):
         #print "Mean Online Loss    :", np.mean(all_online_losses)
         print "Mean seq len / Num positives: {:.1f} / {:.1f}".format(np.mean(sequence_lens), np.mean(num_pos))
         print ''
+        print "Mean l2 reg          :", np.mean(all_l2_reg)
         print "Mean map_prior       :", np.mean(maps_prior_orig)
         print "Mean maps_1_orig     :", np.mean(maps_1_orig)
         print "Mean map_final_orig  :", np.mean(maps_final_orig)
@@ -560,6 +617,12 @@ def main(args):
         print "% map_improvements_final > 0:", (np.array(map_improvements_final) > 0).mean(), (np.array(map_improvements_final) == 0).mean(), (np.array(map_improvements_final) < 0).mean()
         print "% map_improvements_post > 0 :", (np.array(map_improvements_post) > 0).mean(), (np.array(map_improvements_post) == 0).mean(), (np.array(map_improvements_post) < 0).mean()
     print "Time elapsed: {:.1f}m".format((time.time()-start_time)/60)
+    if save_id:
+        np.save('seq_results/observed_ings_{}.npy'.format(save_id), np.array(observed_ings))
+        np.save('seq_results/map_final_orig_{}.npy'.format(save_id), np.array(map_final_orig))
+        np.save('seq_results/map_improvements_final_{}.npy'.format(save_id), np.array(map_improvements_post))
+        np.save('seq_results/num_pos_{}.npy'.format(save_id), np.array(num_pos))
+        np.save('seq_results/all_l2_reg_{}.npy'.format(save_id), np.array(all_l2_reg))
     os.system('say "Done done done."')
 
 if __name__ == "__main__":
@@ -588,11 +651,17 @@ if __name__ == "__main__":
             action='store_true',
             help = "train on askubuntu data"
         )
+    argparser.add_argument("--skip_online_updates",
+            action='store_true',
+        )
     argparser.add_argument("--iterations_per_ing",
             type = int,
         )
     argparser.add_argument("--l2_reg",
             type = float,
+        )
+    argparser.add_argument("--learn_lambda_min_pos",
+            type = int,
         )
     argparser.add_argument("--use_pair",
             action='store_true',
@@ -613,6 +682,9 @@ if __name__ == "__main__":
             type = float,
         )
     argparser.add_argument("--max_iterations",
+            type = int,
+        )
+    argparser.add_argument("--save_id",
             type = int,
         )
     args = argparser.parse_args()
