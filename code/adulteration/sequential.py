@@ -23,6 +23,25 @@ from split_data import split_data_by_wiki
 from wikipedia import get_adulterants, get_ings_wiki_links, get_ings
 wiki_path = '../../../adulteration/wikipedia/'
 
+def load_saved_data(save_id):
+    observed_ings = np.load('seq_results/observed_ings_{}.npy'.format(save_id))
+    map_final_orig = np.load('seq_results/map_final_orig_{}.npy'.format(save_id))
+    map_improvements_post = np.load('seq_results/map_improvements_final_{}.npy'.format(save_id))
+    num_pos = np.load('seq_results/num_pos_{}.npy'.format(save_id))
+    all_l2_reg = np.load('seq_results/all_l2_reg_{}.npy'.format(save_id))
+    return observed_ings, map_final_orig, map_improvements_post, num_pos, all_l2_reg
+
+def combine_reps(reps1, reps2, reps3, indices1, indices2, indices3):
+    reps_all = np.zeros((1000, reps1.shape[1]))
+    for reps, indices in zip([reps1, reps2, reps3], [indices1, indices2, indices3]):
+        for idx, j in enumerate(indices):
+            if j >= 1000:
+                break
+            assert reps_all[j].sum()==0
+            reps_all[j] = reps[idx]
+    return reps_all
+
+
 def sigmoid(w):
     w = np.array(w)
     return 1 / (1 + np.exp(-w))
@@ -88,7 +107,7 @@ def get_baseline_loss(pred, sequence):
     """Compute the baseline loss (with w=eye(d)) given a constant prediction distribution 
     and a sequence of product categories."""
     assert len(sequence)>0
-    if type(sequence[0]) == np.ndarray:
+    if type(sequence[0]) == tuple:
         sequence = list(sum(sequence, ())) # flatten sequence
     probs = []
     for t, y in enumerate(sequence):
@@ -160,11 +179,12 @@ def run_online(ing_idx, reps, reps_prod, binary, skip_online_updates, use_pair, 
         method = 'BFGS' if (lower_bound is None and upper_bound is None) else 'L-BFGS-B'
         
     # Find optimum lambda
-    lambdas = np.array([0.01, 0.03, 0.05, 0.07, 0.1, 0.14, 0.18, 0.22])
+    lambdas = np.array([0.085, 0.09, 0.095, 0.1, 0.105, 0.11, 0.115])
+    #lambdas = np.array([0.01, 0.03, 0.05, 0.07, 0.1, 0.14, 0.18, 0.22])
     lambda_scores = []
     print len(sequence)
     num_pos = len(sequence) if use_pair else (sequence>=0).sum()
-    if num_pos >= learn_lambda_min_pos and not use_pair:
+    if not use_pair and learn_lambda_min_pos and num_pos >= learn_lambda_min_pos:
         # Choose best lambda via cross-validation.
         for l2_reg in lambdas:
             map_left_outs = []
@@ -619,7 +639,7 @@ def main(args):
     print "Time elapsed: {:.1f}m".format((time.time()-start_time)/60)
     if save_id:
         np.save('seq_results/observed_ings_{}.npy'.format(save_id), np.array(observed_ings))
-        np.save('seq_results/map_final_orig_{}.npy'.format(save_id), np.array(map_final_orig))
+        np.save('seq_results/maps_final_orig_{}.npy'.format(save_id), np.array(maps_final_orig))
         np.save('seq_results/map_improvements_final_{}.npy'.format(save_id), np.array(map_improvements_post))
         np.save('seq_results/num_pos_{}.npy'.format(save_id), np.array(num_pos))
         np.save('seq_results/all_l2_reg_{}.npy'.format(save_id), np.array(all_l2_reg))
