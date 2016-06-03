@@ -23,20 +23,57 @@ from split_data import split_data_by_wiki
 from wikipedia import get_adulterants, get_ings_wiki_links, get_ings
 wiki_path = '../../../adulteration/wikipedia/'
 
+def reshape(arr, iterations_per_ing):
+    assert len(arr) % iterations_per_ing == 0
+    n = len(arr)
+    return np.mean(np.reshape(arr, (n/iterations_per_ing,iterations_per_ing)), axis=1)
+
+def box_whisker_plot(save_id, maps_final_orig, map_improvements_final, 
+    iterations_per_ing, split=[0.2, 0.4, 0.6, 0.8, 1]):
+    assert len(maps_final_orig) == len(map_improvements_final)
+    n = len(maps_final_orig)
+    maps_final_orig_ = reshape(maps_final_orig, iterations_per_ing)
+    map_improvements_final_ = reshape(map_improvements_final, iterations_per_ing)
+    num_boxes = len(split)
+    inds = np.digitize(maps_final_orig_, split, right=True)
+    data = [[] for i in range(num_boxes)]
+    for i,v in enumerate(map_improvements_final_):
+        data[inds[i]].append(v)
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    bp = ax.boxplot(data)#, whis=[2,98])
+    print "Boxplot quintile sizes:", [len(i) for i in data]
+    for box in bp['boxes']:
+        box.set(color='skyblue', linewidth=2)
+    for median in bp['medians']:
+        median.set(color='firebrick', linewidth=2)
+    for whisker in bp['whiskers']:
+        whisker.set(color='skyblue', linewidth=2)
+    #plt.ylim((-1,1))
+    #ax.set_yticks(np.arange(-1, 1.05, 0.1), minor=True)
+    #ax.grid(which='minor', alpha=0.5)
+    plt.xlabel('baseline MAP quintile')
+    plt.ylabel('improvement over baseline MAP')
+    plt.grid()
+    ax.set_xticklabels(['[0,0.2]', '(0.2,0.4]', '(0.4,0.6]', '(0.6,0.8]', '(0.8,1]'])
+    plt.savefig('boxplots/boxplot_{}.png'.format(save_id))
+    
+
 def load_saved_data(save_id):
     observed_ings = np.load('seq_results/observed_ings_{}.npy'.format(save_id))
-    map_final_orig = np.load('seq_results/map_final_orig_{}.npy'.format(save_id))
-    map_improvements_post = np.load('seq_results/map_improvements_final_{}.npy'.format(save_id))
+    maps_final_orig = np.load('seq_results/maps_final_orig_{}.npy'.format(save_id))
+    map_improvements_final = np.load('seq_results/map_improvements_final_{}.npy'.format(save_id))
+    map_improvements_rand = np.load('seq_results/map_improvements_final_{}.npy'.format(save_id))
     num_pos = np.load('seq_results/num_pos_{}.npy'.format(save_id))
     all_l2_reg = np.load('seq_results/all_l2_reg_{}.npy'.format(save_id))
-    return observed_ings, map_final_orig, map_improvements_post, num_pos, all_l2_reg
+    return observed_ings, maps_final_orig, map_improvements_final, map_improvements_rand, num_pos, all_l2_reg
 
 def combine_reps(reps1, reps2, reps3, indices1, indices2, indices3):
-    reps_all = np.zeros((1000, reps1.shape[1]))
+    reps_all = np.zeros((5439, reps1.shape[1]))
     for reps, indices in zip([reps1, reps2, reps3], [indices1, indices2, indices3]):
         for idx, j in enumerate(indices):
-            if j >= 1000:
-                break
+            #if j >= 1000:
+            #    break
             assert reps_all[j].sum()==0
             reps_all[j] = reps[idx]
     return reps_all
@@ -103,19 +140,33 @@ def gen_sequence(counts, add_negatives=False, max_positives=None, max_total=None
     #sequence = np.append(first_positive, sequence)
     return sequence
 
-def get_baseline_loss(pred, sequence):
+def get_baseline_loss(ing_idx, pred, sequence, ing_cat_pair_map):
     """Compute the baseline loss (with w=eye(d)) given a constant prediction distribution 
     and a sequence of product categories."""
     assert len(sequence)>0
+    remaining_indices = range(len(pred))
+    
     if type(sequence[0]) == tuple:
         sequence = list(sum(sequence, ())) # flatten sequence
-    probs = []
+    
     for t, y in enumerate(sequence):
-        if y >= 0:
-            probs.append(pred[y])
+        if y>=0 and y in remaining_indices:
+            remaining_indices.remove(y)
+        elif -(y+1) in remaining_indices:
+            remaining_indices.remove(-(y+1))
+        assert len(remaining_indices) > 0
+
+    losses = []
+    for i in remaining_indices:
+        if (ing_idx, i) in ing_cat_pair_map:
+            prob = pred[i]
+            loss = -np.log(prob)
+            losses.append(loss)
         else:
-            probs.append(1 - pred[-(y+1)])
-    loss = np.mean(-np.log(probs))
+            prob = 1 - pred[i]
+            loss = -np.log(prob)
+            losses.append(loss)
+    loss = np.mean(losses)
     return loss
 
 def run_naive_online(reps, reps_prod, binary, sequence, multiplier):
@@ -149,7 +200,7 @@ def run_online(ing_idx, reps, reps_prod, binary, skip_online_updates, use_pair, 
         #prob = pred[batch_y]
         prob = pred[[i if i>=0 else -(i+1) for i in batch_y]]
         prob = [p if batch_y[i]>=0 else 1-p for i,p in enumerate(prob)]
-        loss = -(np.sum(np.log(prob)) - l2_reg*np.sum((w-1)**2)/2)#-np.sum(np.log(w)-w+1))
+        loss = -(np.sum(np.log(prob)) - l2_reg/2*np.sum((w-1)**2))#-np.sum(np.log(w)-w+1))
         return loss
     def loss_func2(w):
         prob = []
@@ -157,7 +208,7 @@ def run_online(ing_idx, reps, reps_prod, binary, skip_online_updates, use_pair, 
             neg_idx = -(neg_idx + 1)
             v = p_y_given_x(reps, (reps_prod[pos_idx]-reps_prod[neg_idx]).T, binary, w)[0]
             prob.append(v)
-        loss = -(np.sum(np.log(prob)) - l2_reg*np.sum((w-1)**2)/2)#-np.sum(np.log(w)-w+1))
+        loss = -(np.sum(np.log(prob)) - l2_reg/2*np.sum((w-1)**2))#-np.sum(np.log(w)-w+1))
         return loss
 
     sequence = np.array(sequence)
@@ -184,7 +235,7 @@ def run_online(ing_idx, reps, reps_prod, binary, skip_online_updates, use_pair, 
     lambda_scores = []
     print len(sequence)
     num_pos = len(sequence) if use_pair else (sequence>=0).sum()
-    if not use_pair and learn_lambda_min_pos and num_pos >= learn_lambda_min_pos:
+    if not use_pair and learn_lambda_min_pos and num_pos >= learn_lambda_min_pos and num_pos < 20:
         # Choose best lambda via cross-validation.
         for l2_reg in lambdas:
             map_left_outs = []
@@ -226,23 +277,25 @@ def run_online(ing_idx, reps, reps_prod, binary, skip_online_updates, use_pair, 
     for t, y in enumerate(sequence):
         if use_pair:
             pos_idx, neg_idx = y
-            if pos_idx not in seen_indices:
-                losses.append(-np.log(pred[pos_idx]))
-                seen_indices.add(pos_idx)
-            if neg_idx not in seen_indices:
-                losses.append(-np.log(1-pred[-(neg_idx+1)]))
-                seen_indices.add(neg_idx)
-        else:
-            if y not in seen_indices:
-                if y >= 0:
-                    prob = pred[y]
-                    loss = -np.log(prob)
-                    losses.append(loss)
-                else:
-                    prob = 1 - pred[-(y+1)]
-                    loss = -np.log(prob)
-                    losses.append(loss)
-                seen_indices.add(y)
+        if not skip_online_updates:
+            if use_pair:
+                if pos_idx not in seen_indices:
+                    losses.append(-np.log(pred[pos_idx]))
+                    seen_indices.add(pos_idx)
+                if neg_idx not in seen_indices:
+                    losses.append(-np.log(1-pred[-(neg_idx+1)]))
+                    seen_indices.add(neg_idx)
+            else:
+                if y not in seen_indices:
+                    if y >= 0:
+                        prob = pred[y]
+                        loss = -np.log(prob)
+                        losses.append(loss)
+                    else:
+                        prob = 1 - pred[-(y+1)]
+                        loss = -np.log(prob)
+                        losses.append(loss)
+                    seen_indices.add(y)
         
         if use_pair:
             if pos_idx in remaining_indices:
@@ -260,6 +313,17 @@ def run_online(ing_idx, reps, reps_prod, binary, skip_online_updates, use_pair, 
         if skip_online_updates and t != len(sequence)-1:
             continue
 
+        if t in [1, len(sequence)-1]:
+            print "Random"
+            map_score_rand, prec_at_n_score_rand = evaluate_map(
+                [ing_idx], [pred], ing_cat_pair_map, random=True, results_indices=remaining_indices)
+            print "Orig Pred"
+            map_score_orig, prec_at_n_score_orig = evaluate_map(
+                [ing_idx], [orig_pred], ing_cat_pair_map, results_indices=remaining_indices)
+            if map_score_orig - map_score_rand > 0.3:
+                # if baseline prediction is good, set higher regularizer
+                l2_reg *= min(5, map_score_orig / map_score_rand) 
+
         batch_y = sequence[t:max(0,t-batch):-1]
         res = optimize.minimize(loss_func, w, 
             method=method, 
@@ -272,12 +336,12 @@ def run_online(ing_idx, reps, reps_prod, binary, skip_online_updates, use_pair, 
         if t in [1, len(sequence)-1]:
             print "Num observations:", t+1
             print "Remaining categories:", len(remaining_indices)
-            print "Random"
-            map_score_rand, prec_at_n_score_rand = evaluate_map(
-                [ing_idx], [pred], ing_cat_pair_map, random=True, results_indices=remaining_indices)
-            print "Orig Pred"
-            map_score_orig, prec_at_n_score_orig = evaluate_map(
-                [ing_idx], [orig_pred], ing_cat_pair_map, results_indices=remaining_indices)
+            #print "Random"
+            #map_score_rand, prec_at_n_score_rand = evaluate_map(
+            #    [ing_idx], [pred], ing_cat_pair_map, random=True, results_indices=remaining_indices)
+            #print "Orig Pred"
+            #map_score_orig, prec_at_n_score_orig = evaluate_map(
+            #    [ing_idx], [orig_pred], ing_cat_pair_map, results_indices=remaining_indices)
             print "New Pred"
             map_score_new, prec_at_n_score_new = evaluate_map(
                 [ing_idx], [pred], ing_cat_pair_map, results_indices=remaining_indices)
@@ -320,7 +384,7 @@ def run_online(ing_idx, reps, reps_prod, binary, skip_online_updates, use_pair, 
     plt.grid()
     """
     return np.mean(losses), w, l2_reg, map_1_orig, map_1_new, \
-        map_final_orig, map_final_new, map_prior, map_posterior
+        map_final_orig, map_final_new, map_prior, map_posterior, map_score_rand
 
 def unseen_wiki_articles(seed=42):
     ing_wiki_links = get_ings_wiki_links()
@@ -457,7 +521,7 @@ def main(args):
         assert len(predictions) == len(indices)
     
     if not use_args:
-        if askubuntu:
+        if use_askubuntu:
             skip_online_updates = True
             iterations_per_ing = 5
             l2_reg = 0.015#0.015
@@ -478,7 +542,7 @@ def main(args):
         else:
             #print_predictions = True
             skip_online_updates = True
-            iterations_per_ing = 5
+            iterations_per_ing = 20
             l2_reg = 0.1 #0.5
             learn_lambda_min_pos = 9999
             maxiter = None#100
@@ -491,7 +555,7 @@ def main(args):
             upper_bound = 2
             max_positives = 20
             max_total = 100
-            max_negatives_ratio = 5
+            max_negatives_ratio = 6
             max_iterations = 200
             save_id = 1
     all_min_losses = [] # loss using true distrubution
@@ -504,6 +568,7 @@ def main(args):
     map_improvements_1 = []
     map_improvements_final = []
     map_improvements_post = []
+    map_improvements_rand = [] # map_baseline - map_random
     maps_1_orig = []
     maps_final_orig = []
     maps_prior_orig = []
@@ -513,12 +578,15 @@ def main(args):
     final_weights = []
     all_l2_reg = []
     start_time = time.time()
-    cur_iterations = 0
+    cur_iteration = 0
     indices2 = list(enumerate(indices))[::-1]
     #np.random.shuffle(indices2)
     for i, ind in indices2:#enumerate(indices):
-        cur_iterations += 1
-        if max_iterations and cur_iterations > max_iterations:
+        if not use_askubuntu and ind >= 5000:
+            # skip adulterants
+            continue
+        cur_iteration += 1
+        if max_iterations and cur_iteration > max_iterations:
             break
         iter_start_time = time.time()
         if use_askubuntu:
@@ -551,6 +619,8 @@ def main(args):
                 # filter by pair scores
                 seq_scores = [pred[pos_idx]-pred[neg_idx] for pos_idx, neg_idx in sequence]
                 sequence = [sequence[i] for i in sorted(np.argsort(seq_scores)[:max_total])]
+            #if (counts>0).sum() > 5:
+            #    l2_reg = 0.01
             if iteration == 0:
                 if use_pair:
                     print "# pairs: {}, {} total Pos".format(len(sequence), (counts>0).sum())
@@ -558,17 +628,17 @@ def main(args):
                     print "# Pos in seq: {} / {}, {} total Pos".format((sequence>=0).sum(), len(sequence), (counts>0).sum())
                 sequence_lens.append(len(sequence))
                 num_pos.append((counts>0).sum())
-                min_loss = get_baseline_loss(true_dist, sequence) # should be 0 for binary
+                min_loss = get_baseline_loss(ind, true_dist, sequence, ing_cat_pair_map) # should be 0 for binary
                 if binary:
-                    uniform_loss = get_baseline_loss(np.ones(num_categories)/2., sequence)
+                    uniform_loss = get_baseline_loss(ind, np.ones(num_categories)/2., sequence, ing_cat_pair_map)
                 else:
-                    uniform_loss = get_baseline_loss(np.ones(num_categories, dtype=float)/num_categories, sequence)
-                baseline_loss = get_baseline_loss(pred, sequence)
+                    uniform_loss = get_baseline_loss(ind, np.ones(num_categories, dtype=float)/num_categories, sequence, ing_cat_pair_map)
+                baseline_loss = get_baseline_loss(ind, pred, sequence, ing_cat_pair_map)
             #naive_online_loss, naive_pred = run_naive_online(rep, reps_prod, binary, sequence, naive_mutiplier)
             
         
             batchall_loss, w_batchall, new_l2_reg, map_1_orig, map_1_new, map_final_orig, \
-                map_final_new, map_prior, map_posterior = run_online(
+                map_final_new, map_prior, map_posterior, map_rand = run_online(
                 ind, rep, reps_prod, binary, skip_online_updates, use_pair, sequence, len(sequence), l2_reg, \
                 learn_lambda_min_pos, maxiter, step_size, method, lower_bound, upper_bound, ing_cat_pair_map)
             map_improvement_1 = map_1_new - map_1_orig
@@ -580,6 +650,7 @@ def main(args):
             map_improvements_1.append(map_improvement_1)
             map_improvements_final.append(map_improvement_final)
             map_improvements_post.append(map_improvement_post)
+            map_improvements_rand.append(map_final_orig-map_rand)
             maps_1_orig.append(map_1_orig)
             maps_final_orig.append(map_final_orig)
             maps_prior_orig.append(map_prior)
@@ -593,6 +664,8 @@ def main(args):
             #all_online_losses.append(online_loss)
 
         if not use_askubuntu:# and print_predictions:
+            pos_cats = [idx_to_cat[pos_idx] for pos_idx in sequence[sequence>=0]]
+            print "Observed cats:", pos_cats
             # True distribution
             test_model(true_dist.reshape(1,-1), [ing], idx_to_cat, top_n=10, ings_wiki_links=ings_wiki_links)
             # Baseline prediction
@@ -633,6 +706,7 @@ def main(args):
         print "Mean map_improvements_1     :", np.mean(map_improvements_1)
         print "Mean map_improvements_final :", np.mean(map_improvements_final)
         print "Mean map_improvements_post :", np.mean(map_improvements_post)
+        print "Mean map_improvements_rand :", np.mean(map_improvements_rand)
         print "% map_improvements_1 > 0    :", (np.array(map_improvements_1) > 0).mean(), (np.array(map_improvements_1) == 0).mean(), (np.array(map_improvements_1) < 0).mean()
         print "% map_improvements_final > 0:", (np.array(map_improvements_final) > 0).mean(), (np.array(map_improvements_final) == 0).mean(), (np.array(map_improvements_final) < 0).mean()
         print "% map_improvements_post > 0 :", (np.array(map_improvements_post) > 0).mean(), (np.array(map_improvements_post) == 0).mean(), (np.array(map_improvements_post) < 0).mean()
@@ -640,10 +714,12 @@ def main(args):
     if save_id:
         np.save('seq_results/observed_ings_{}.npy'.format(save_id), np.array(observed_ings))
         np.save('seq_results/maps_final_orig_{}.npy'.format(save_id), np.array(maps_final_orig))
-        np.save('seq_results/map_improvements_final_{}.npy'.format(save_id), np.array(map_improvements_post))
+        np.save('seq_results/map_improvements_final_{}.npy'.format(save_id), np.array(map_improvements_final))
+        np.save('seq_results/map_improvements_rand_{}.npy'.format(save_id), np.array(map_improvements_rand))
         np.save('seq_results/num_pos_{}.npy'.format(save_id), np.array(num_pos))
         np.save('seq_results/all_l2_reg_{}.npy'.format(save_id), np.array(all_l2_reg))
     os.system('say "Done done done."')
+    box_whisker_plot(save_id, maps_final_orig, map_improvements_final, iterations_per_ing)
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
