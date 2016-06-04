@@ -34,10 +34,11 @@ def box_whisker_plot(save_id, maps_final_orig, map_improvements_final,
     n = len(maps_final_orig)
     maps_final_orig_ = reshape(maps_final_orig, iterations_per_ing)
     map_improvements_final_ = reshape(map_improvements_final, iterations_per_ing)
+    perc_map_improvements_final = map_improvements_final_ / maps_final_orig_
     num_boxes = len(split)
     inds = np.digitize(maps_final_orig_, split, right=True)
     data = [[] for i in range(num_boxes)]
-    for i,v in enumerate(map_improvements_final_):
+    for i,v in enumerate(perc_map_improvements_final):
         data[inds[i]].append(v)
     fig = plt.figure()
     ax = fig.add_subplot(111)
@@ -49,21 +50,21 @@ def box_whisker_plot(save_id, maps_final_orig, map_improvements_final,
         median.set(color='firebrick', linewidth=2)
     for whisker in bp['whiskers']:
         whisker.set(color='skyblue', linewidth=2)
-    #plt.ylim((-1,1))
+    plt.ylim((-1,200))
     #ax.set_yticks(np.arange(-1, 1.05, 0.1), minor=True)
     #ax.grid(which='minor', alpha=0.5)
     plt.xlabel('baseline MAP quintile')
-    plt.ylabel('improvement over baseline MAP')
+    plt.ylabel('% improvement over baseline MAP')
     plt.grid()
     ax.set_xticklabels(['[0,0.2]', '(0.2,0.4]', '(0.4,0.6]', '(0.6,0.8]', '(0.8,1]'])
-    plt.savefig('boxplots/boxplot_{}.png'.format(save_id))
+    plt.savefig('boxplots/boxplot_{}_perc.png'.format(save_id))
     
 
 def load_saved_data(save_id):
     observed_ings = np.load('seq_results/observed_ings_{}.npy'.format(save_id))
     maps_final_orig = np.load('seq_results/maps_final_orig_{}.npy'.format(save_id))
     map_improvements_final = np.load('seq_results/map_improvements_final_{}.npy'.format(save_id))
-    map_improvements_rand = np.load('seq_results/map_improvements_final_{}.npy'.format(save_id))
+    map_improvements_rand = np.load('seq_results/map_improvements_rand_{}.npy'.format(save_id))
     num_pos = np.load('seq_results/num_pos_{}.npy'.format(save_id))
     all_l2_reg = np.load('seq_results/all_l2_reg_{}.npy'.format(save_id))
     return observed_ings, maps_final_orig, map_improvements_final, map_improvements_rand, num_pos, all_l2_reg
