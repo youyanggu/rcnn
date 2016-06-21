@@ -1,5 +1,10 @@
 *.pkl
 *.old
+*.npy
+*.txt
+*.png
 predictions/
 models/
 representations/
+seq_results/
+askubuntu_vectors/
