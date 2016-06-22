@@ -1,29 +1,7 @@
-### Recurrent & Convolutional Neural Network Modules
+### Modeling Ingredients from Wikipedia text
 
-This repo contains Theano implementations of popular neural network components, optimization methods and new architectures used in recent research papers.
+This repo contains the code to generate representations for ingredients and adulterants based on the Wikipedia articles. The representations are used to predict a food product category from a given ingredient. We also show a sequential update model that can improve predictions based on a few observations.
 
-Source code of NN library at [code/nn/](/code/nn)
+The RNN model is based off of https://github.com/taolei87/rcnn.
 
-#### Features
-  - Basic modules including feedforward layer, dropout layer, word embedding layer, RNN, LSTM, GRU and CNN
-  - Optimization methods including SGD (with gradient clipping), AdaGrad, AdaDelta and Adam
-  - Advanced modules from recent papers:
-    - non-consecutive, non-linear CNN (http://arxiv.org/abs/1508.04112)
-    - attention layer, non-recurrent version (http://arxiv.org/abs/1509.06664)
-    - attention layer, non-recurrent bi-linear version (http://arxiv.org/pdf/1509.00685.pdf)
-    - recurrent convolutional network (http://arxiv.org/abs/1512.05726)
-  - Transparent to use GPU
-
-#### Dependencies
-  [Theano](http://deeplearning.net/software/theano/) >= 0.7, Python >= 2.7, Numpy
-  
-<br>
-
-----------
-
-### Projects
-#### 1. Similar Question Retrieval 
-
-The directories [code/qa](/code/qa) and [code/pt](/code/pt) contain the implementation of the model described in the paper [Denoising Bodies to Titles: Retrieving Similar Questions with Recurrent Convolutional Models](http://arxiv.org/abs/1512.05726).
-
-The training, dev and test data are available at [data/](/data/). Pre-trained word vectors available at [vectors/](/vectors/)
+The code also requires access to the following repository: https://github.com/youyanggu/adulteration.
